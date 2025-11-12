@@ -1,0 +1,15 @@
+{
+  "name": "material discovery",
+  "dockerComposeFile": "../docker-compose.yaml",
+  "service": "mmdiscovery",
+  "workspaceFolder": "/home/mmdiscovery/shared",
+  "shutdownAction": "stopCompose",
+  "customizations": {
+    "vscode": {
+        "extensions": [
+    "ms-python.python",
+    "ms-vscode.cpptools"
+  ]
+    }
+  }
+}

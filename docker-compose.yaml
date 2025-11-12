@@ -1,0 +1,19 @@
+services:
+  mmdiscovery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mmdiscovery
+    volumes:
+      - .:/home/mmdiscovery/shared
+    working_dir: /home/mmdiscovery/shared
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: tail -f /dev/null
+
+    # This section must be indented under the service!
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
