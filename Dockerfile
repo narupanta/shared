@@ -15,16 +15,18 @@ RUN pip install --no-cache-dir \
     tqdm \
     scikit-learn \
     matplotlib \
-    matplotlib-label-lines \
-    gpytorch
-# RUN pip install --no-cache-dir \
-#     jax==0.4.25 \
-#     jaxlib==0.4.25+cuda11.cudnn86 \
-#     -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-
-# Optional: Install PyTorch with CUDA 11.8 support
-RUN pip install --index-url https://download.pytorch.org/whl/cu118 \
-    torch torchvision torchaudio --no-cache-dir
+    matplotlib-label-lines 
+    
+RUN pip install --no-cache-dir \
+    jax==0.4.25 \
+    jaxlib==0.4.25+cuda11.cudnn86 \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html \
+    meshio \
+    pyfiglet 
+    # jax-fem \
+    # jaxlib \
+    # flax \
+    # gpjax 
 
 
 # Set working directory

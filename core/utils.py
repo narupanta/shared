@@ -1,49 +1,55 @@
-import torch
-import gpytorch
+import jax
+import jax.numpy as jnp
 import numpy as np
+import gpjax as gpx
+# -------------------------------
+# Tensor utility functions
+# -------------------------------
+
 def J_func(f):
-    return torch.linalg.det(f)  # shape [N]
+    """Determinant of deformation gradient tensor."""
+    return jnp.linalg.det(f)  # shape [N]
 
 def B_func(f):
-    return f @ f.transpose(-2,-1)  # [N,d,d]
-
+    """Left Cauchy-Green tensor."""
+    return f @ jnp.swapaxes(f, -2, -1)  # [N,d,d]
+def C_func(f) :
+    return jnp.swapaxes(f, -2, -1) @ f  # [N,d,d]
 def I1_func(B):
-    return torch.einsum('...ii->...', B)  # trace along last two dims
+    """First invariant (trace)."""
+    return jnp.trace(B, axis1=-2, axis2=-1)
 
 def I2_func(B):
-    trB = torch.einsum('...ii->...', B)
-    trBB = torch.einsum('...ii->...', B @ B)
+    """Second invariant."""
+    trB = jnp.trace(B, axis1=-2, axis2=-1)
+    trBB = jnp.trace(B @ B, axis1=-2, axis2=-1)
     return 0.5 * (trB**2 - trBB)
-def I3_func(B):
-    return torch.linalg.det(B)  # shape [N]
 
-def MooneyRivlinPhi(I1, I2, I3):
-    # c1, c2, c3 = 1.0, 0.001, 1000
-    c1, c2, c3 = 0.162, 0.0059, 10
-    term1 = c1 * (I3**(-0.5) * I1 - 3)
-    term2 = c2 * (I3**(-2/3) * I2 - 3)
-    term3 = c3 * (I3**0.5 - 1)**2
-    return term1 + term2 + term3  # [N]
-def NeoHookeanPhi(f):
-    c1, c2 = 0.5, 1.5
-    term1 = c1 * (torch.sqrt(I3_func(f))**(-2/3) * I1_func(f) - 3)
-    term2 = c2 * (torch.sqrt(I3_func(f)) - 1) ** 2
-    return term1 + term2
+def I3_func(B):
+    """Third invariant (determinant)."""
+    return jnp.linalg.det(B)
+
+# -------------------------------
+# Strain energy functions
+# -------------------------------
+
+
+# -------------------------------
+# Solve for coefficients (batched)
+# -------------------------------
 
 def solve_for_coefficients_batched(lambda_B, lambda_sigma):
     """
     Batched version of solve_for_coefficients.
 
     Args:
-        lambda_B: Tensor of shape (batch_size, 3)
-        lambda_sigma: Tensor of shape (batch_size, 3)
+        lambda_B: array (batch_size, 3)
+        lambda_sigma: array (batch_size, 3)
 
     Returns:
-        coefficients_c: Tensor of shape (batch_size, 3)
-        V: Vandermonde matrices of shape (batch_size, 3, 3)
+        coefficients_c: (batch_size, 3)
+        V: (batch_size, 3, 3)
     """
-
-    # --- 1. Validate input shapes ---
     if lambda_B.ndim != 2 or lambda_B.shape[1] != 3:
         raise ValueError("lambda_B must have shape (batch_size, 3)")
     if lambda_sigma.ndim != 2 or lambda_sigma.shape[1] != 3:
@@ -51,70 +57,114 @@ def solve_for_coefficients_batched(lambda_B, lambda_sigma):
     if lambda_B.shape[0] != lambda_sigma.shape[0]:
         raise ValueError("Batch sizes of lambda_B and lambda_sigma must match.")
 
-    # --- 2. Construct Vandermonde matrices ---
-    # V[i] = [[1, λ1, λ1²],
-    #         [1, λ2, λ2²],
-    #         [1, λ3, λ3²]]
-    col1 = torch.ones_like(lambda_B)
+    # Construct Vandermonde matrices
+    col1 = jnp.ones_like(lambda_B)
     col2 = lambda_B
     col3 = lambda_B**2
+    V = jnp.stack((col1, col2, col3), axis=-1)  # (batch_size, 3, 3)
 
-    V = torch.stack((col1, col2, col3), dim=-1)  # (batch_size, 3, 3)
-
-    # --- 3. Compute pseudoinverses for each batch ---
-    # torch.linalg.pinv supports batched input
-    V_pinv = torch.linalg.pinv(V)  # (batch_size, 3, 3)
-
-    # --- 4. Solve for c ---
-    # (batch_size, 3, 3) @ (batch_size, 3, 1) -> (batch_size, 3, 1)
-    coefficients_c = torch.bmm(V_pinv, lambda_sigma.unsqueeze(-1)).squeeze(-1)
-
+    # Compute pseudoinverse and solve for coefficients
+    V_pinv = jnp.linalg.pinv(V)
+    coefficients_c = jnp.einsum("bij,bj->bi", V_pinv, lambda_sigma)
     return coefficients_c, V
 
+# -------------------------------
+# Generate random F tensors (Plane Stress)
+# -------------------------------
 
-def generate_random_F_2D(n_samples, lambda_range=(0.5, 2.5)):
+def generate_random_F_plane_stress(n_samples, lambda_range=(0.5, 2.5), seed=None):
     """
     Generates n_samples of 3x3 Deformation Gradient (F) tensors 
     constrained to 2D Plane Strain (F33=1, F_i3=0, F_3i=0 for i=1,2).
-    
-    The top-left 2x2 submatrix F_2D is generated randomly using polar decomposition
-    and a random in-plane rotation.
     """
-    F_list = []
+    key = jax.random.PRNGKey(seed if seed is not None else 0)
     low, high = lambda_range
-    
-    # Calculate the number of shear samples to add
     n_shear = n_samples // 10
-    
-    for i in range(n_samples):
-        # 1. Random 2x2 Stretch Matrix (V_2D - Diagonal)
-        # Sample two principal stretches for the plane
-        lambdas_2D = np.random.rand(2) * (high - low) + low
-        V_2D = np.diag(lambdas_2D)
-        
-        # 2. Random 2x2 Rotation Matrix (R_2D - Orthogonal)
-        # Random angle for in-plane rotation
-        theta = np.random.rand() * 2 * np.pi
-        R_2D = np.array([
-            [np.cos(theta), -np.sin(theta)],
-            [np.sin(theta), np.cos(theta)]
-        ])
-        
-        # 3. 2x2 Deformation Gradient F_2D = R_2D @ V_2D
-        F_2D_sub = R_2D @ V_2D
-        
-        # 4. Construct the 3x3 Plane Strain F
-        F_sample = np.eye(3)
-        F_sample[:2, :2] = F_2D_sub
-        
-        F_list.append(F_sample[None, :, :])
 
-    # Add a set of Pure Shear states (Simple Shear in the 2D plane)
-    gamma_shear = np.random.rand(n_shear) * (high - low) + low
-    F_shear = np.tile(np.eye(3), (n_shear, 1, 1))
+    def single_sample(key):
+        k1, k2 = jax.random.split(key)
+        lambdas_2D = jax.random.uniform(k1, (2,), minval=low, maxval=high)
+        V_2D = jnp.diag(lambdas_2D)
+        theta = jax.random.uniform(k2, (), minval=0, maxval=2 * jnp.pi)
+        R_2D = jnp.array([
+            [jnp.cos(theta), -jnp.sin(theta)],
+            [jnp.sin(theta), jnp.cos(theta)]
+        ])
+        F_2D = R_2D @ V_2D
+        F = jnp.eye(3)
+        F = F.at[:2, :2].set(F_2D)
+        return F
+
+    # Generate all random samples
+    keys = jax.random.split(key, n_samples)
+    F_samples = jax.vmap(single_sample)(keys)
+
+    # Add shear states
+    key_shear = jax.random.split(key, n_shear + 1)[-1]
+    gamma_shear = jax.random.uniform(key_shear, (n_shear,), minval=low, maxval=high)
+    F_shear = jnp.tile(jnp.eye(3), (n_shear, 1, 1))
+    F_shear = F_shear.at[:, 0, 1].set(gamma_shear)
+
+    return jnp.concatenate([F_samples, F_shear], axis=0)
+
+
+from jax import vmap
+
+def sum_negative_conjugate_mll(posteriors, datasets):
+    """
+    Computes the Sum Negative Marginal Log-Likelihood (Sum MLL) 
+    across a tuple of independent GPs and their datasets.
+    """
+    # Vectorize the individual negative MLL function across the list/tuple of models and datasets
+    all_mlls = vmap(
+        lambda p, d: -gpx.objectives.conjugate_mll(p, d), 
+        in_axes=(0, 0) # Map along the first axis of both the posteriors (p) and datasets (d)
+    )(posteriors, datasets)
     
-    # F_12 component for simple shear
-    F_shear[:, 0, 1] = gamma_shear
-    F_list.append(F_shear)
-    
-    return np.concatenate(F_list, axis=0)
+    # Sum the result
+    return jnp.sum(all_mlls)
+
+def deformation_gradient_element(coords_elem, disp_elem):
+    x1, y1 = coords_elem[0]
+    x2, y2 = coords_elem[1]
+    x3, y3 = coords_elem[2]
+
+    # Jacobian of shape function derivatives
+    J = jnp.array([
+        [x2 - x1, y2 - y1],
+        [x3 - x1, y3 - y1]
+    ])
+
+    # Area factor
+    detJ = jnp.linalg.det(J)
+
+    # Shape function derivatives in reference space
+    dN_ref = jnp.array([
+        [-1., -1.],
+        [ 1.,  0.],
+        [ 0.,  1.]
+    ])
+
+    # Convert to physical derivatives: dN/dx = inv(J)^T * dN_ref
+    dNdx = jnp.transpose(jnp.linalg.solve(J, dN_ref.T))
+
+    # Gradient of displacement
+    gradu = disp_elem.T @ dNdx  # 2x3 @ 3x2 = 2x2
+
+    # Deformation gradient
+    F = jnp.eye(2) + gradu
+    return F
+
+import jax.numpy as jnp
+
+def detrend_3d_jax(X, y):
+    N = X.shape[0]
+    X_design = jnp.hstack([jnp.ones((N, 1)), X])  # shape (N, 4)
+
+    # Solve via lstsq
+    beta, residuals, rank, s = jnp.linalg.lstsq(X_design, y)
+
+    trend = X_design @ beta
+    y_detrended = y - trend
+
+    return y_detrended, beta, trend
