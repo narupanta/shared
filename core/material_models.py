@@ -114,21 +114,69 @@ class BaseMaterialModel(ABC):
 
 @register_material("mooney-rivlin")
 class MooneyRivlin(BaseMaterialModel):
-    def __init__(self, c1=0.162, c2=0.0059, c3=10.0, jit_P: bool = True):
+    def __init__(self, c01 = 1.0, c02 = 1.0, c10 = 1.0, c11 = 1.0, c12 = 1.0, c20 = 1.0, c21 = 1.0, c22 = 1.0, d0 = 1.0, d1 = 1.0, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
-        self.c1 = c1
-        self.c2 = c2
-        self.c3 = c3
+        self.dev_params = [c01, c02, c10, c11, c12, c20, c21, c22]
+        self.vol_params = [d0, d1]
 
     def phi(self, F: jnp.ndarray) -> jnp.ndarray:
-        B = B_func(F)
-        I1 = I1_func(B)
-        I2 = I2_func(B)
-        I3 = I3_func(B)
-        t1 = self.c1 * (I3**(-0.5) * I1 - 3)
-        t2 = self.c2 * (I3**(-2/3) * I2 - 3)
-        t3 = self.c3 * (jnp.sqrt(I3) - 1)**2
-        return t1 + t2 + t3
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                        [F[1, 0], F[1, 1], 0.],
+                        [0.,      0.,     1. ]])
+        c = C_func(F)
+        I1 = I1_func(c)
+        I2 = I2_func(c)
+        I3 = I3_func(c)
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        i1_dev = I3_safe**(-1/3) * I1
+        i2_dev = I3_safe**(-2/3) * I2
+
+        X = i1_dev - 3.0
+        Y = i2_dev - 3.0
+        
+        # --- Deviatoric Terms (W) ---
+        # Assuming dev_params = [c01, c02, c10, c11, c12, c20, c21, c22]
+        # Using the standard N=2 Polynomial Model terms (C10, C01, C20, C11, C02)
+        dev_terms = (
+            # C10 * X
+            self.dev_params[2] * X + 
+            # C01 * Y
+            self.dev_params[0] * Y + 
+            # C20 * X**2
+            self.dev_params[5] * X**2 + 
+            # C11 * X * Y
+            self.dev_params[3] * X * Y + 
+            # C02 * Y**2
+            self.dev_params[1] * Y**2 +
+
+            self.dev_params[4] * X*Y**2 + 
+
+            self.dev_params[6] * X**2 * Y + 
+
+            self.dev_params[7] * X**2 * Y ** 2
+
+            # Add C12, C21, C22 terms here if required by your specific model definition
+        )
+        
+        # --- Volumetric Terms (U) ---
+        # Assuming vol_params = [d0, d1] are D2 and D1 parameters (inverse bulk moduli)
+        J = jnp.sqrt(I3_safe)
+        J_minus_1 = J - 1.0
+
+        # Assuming the volumetric function U(J) = (1/D1)(J-1)^2 + (1/D2)(J-1)^4
+        # with D1=d1 and D2=d0 (or vice versa, depending on convention)
+        
+        # D1 is typically the lower order term (quadratic, hence d1)
+        # D2 is typically the higher order term (quartic, hence d0)
+        vol_terms = (
+            # (1/D1) * (J - 1)**2
+            (self.vol_params[0]) * J_minus_1**2 + 
+            # (1/D2) * (J - 1)**4
+            (self.vol_params[1]) * J_minus_1**4
+        )
+        
+        return dev_terms + vol_terms
 
 
 @register_material("neohookean")
@@ -169,6 +217,7 @@ class Isihara(BaseMaterialModel):
         term3 = (I3_safe**(-1/3) * I1 - 3)**2
         term4 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2 + term3 + term4
+
 
 
 # ------------------------------

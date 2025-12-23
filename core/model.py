@@ -13,6 +13,7 @@ import pickle
 import gpjax as gpx
 import optax as ox
 from gpjax.kernels.computations import DenseKernelComputation
+from gpjax.mean_functions import AbstractMeanFunction
 key = jr.key(123)
 class MinMaxScaler:
     """A minimal, JAX-compatible MinMaxScaler with small-epsilon safety."""
@@ -509,3 +510,176 @@ class SVTBGPModelCK :
             histories.append(history)
         self.opt_posteriors = opt_posteriors
         return opt_posteriors, histories
+    
+
+class NHPriorFunc :
+    def __init__(self, mu=0.5, kappa=1.0):
+        self.mu = mu
+        self.kappa = kappa
+    def __call__(self, x):
+        """
+        x : shape (N, d)
+        returns mean : shape (N, 1)
+        """
+        I1 = x[0]
+        I3 = x[2]
+
+        return (
+            self.mu / 2.0 * (I3**(-1/3)*I1 - 3.0)
+            + self.kappa / 2.0 * (jnp.sqrt(I3) - 1.0) ** 2
+        )  
+    
+class NHPrior(AbstractMeanFunction):
+    def __init__(self, mu=1.0, kappa=3.0):
+        super().__init__()
+
+        self.mu = mu
+        self.kappa = kappa
+        self.prior_mean_func = NHPriorFunc(self.mu, self.kappa)
+    # @jax.vmap
+    def __call__(self, x):
+        """
+        x : shape (N, d)
+        returns mean : shape (N, 1)
+        """
+        return jax.vmap(self.prior_mean_func)(x)
+    
+class StrainGPModel :
+    def __init__(self) :
+        self.mean_func = NHPrior()
+        self.kernel = gpx.kernels.RBF(active_dims=[0,1,2], lengthscale=[1.0,2.0,3.0],n_dims = 3)  # 1-dimensional input
+        self.prior = gpx.gps.Prior(mean_function=self.mean_func, kernel=self.kernel)
+    def sample_prior(self, test_input) :
+        return self.prior(test_input, return_covariance_type="dense")
+    
+
+
+import jax.numpy as jnp
+import jax
+
+@jax.jit
+def rbf_kernel(X1: jnp.array, X2: jnp.array, variance: float, lengthscales: jnp.array) -> jnp.array:
+    """
+    Computes the ARD RBF Gram/Covariance matrix.
+    X1, X2 are (N, D) and (M, D).
+    lengthscales is a vector (D,).
+    """
+    # 1. Calculate the raw difference tensor: (N, M, D)
+    diff = X1[:, None, :] - X2[None, :, :]
+    
+    # 2. Apply the weighted (inverse lengthscale squared) distance for each dimension
+    # This is the core ARD step: (x_d - x'_d)^2 / (l_d)^2
+    # The exponent is a sum over the D dimension: (N, M)
+    exponent = jnp.sum((diff / lengthscales)**2, axis=-1)
+    
+    # RBF formula: k(x, x') = sigma^2 * exp(- 0.5 * sum_d (x_d - x'_d)^2 / (l_d)^2)
+    K = variance * jnp.exp(-0.5 * exponent)
+    return K    
+
+
+def matern52_kernel(X1: jnp.array, X2: jnp.array, variance: float, lengthscales: jnp.array) -> jnp.array:
+    """
+    Computes the ARD Matern 5/2 Gram matrix.
+    X1: (N, D), X2: (M, D), lengthscales: (D,)
+    """
+    # 1. Scaled squared difference: sum_d ( (x_d - x'_d) / l_d )^2
+    # This represents the squared Mahalanobis distance
+    diff = X1[:, None, :] - X2[None, :, :]
+    dist_sq = jnp.sum((diff / lengthscales)**2, axis=-1)
+    
+    # 2. Add a small epsilon for numerical stability when taking the sqrt
+    # dist = sqrt(sum (delta_x / l)^2)
+    dist = jnp.sqrt(jnp.maximum(dist_sq, 1e-12))
+    
+    # 3. Matern 5/2 formula
+    sqrt5 = jnp.sqrt(5.0)
+    K = variance * (1.0 + sqrt5 * dist + (5.0/3.0) * dist_sq) * jnp.exp(-sqrt5 * dist)
+    
+    return K
+
+class SparseHyperelasticityGP :
+    '''get g latent energy which will be joint gaussian with latent energy at testpoint'''
+    def __init__(self, lengthscales, variance, growth_constant, learnable_latent_energy, inducing_points) :
+        self.inducing_points = inducing_points
+        self.params = {"lengthscales" : lengthscales, "variance" : variance, "learnable_latent_energy": learnable_latent_energy, "log_growth_constant": growth_constant}
+    def get_kernel_matrix(self, X1, X2) :
+        return rbf_kernel(X1, X2, self.params["variance"], self.params["lengthscales"])
+    def psi_dev(self, i_star):
+        '''
+        __call__ : evaluate mean Physical Strain Energy Function at test point i_star
+
+        :param self: Description
+        :param i_star: Description
+        '''
+        i_star = jnp.atleast_2d(i_star)
+        j_star = jnp.sqrt(i_star[:, 2] + 1e-9)
+        i_star_dev = jnp.stack([j_star**(-2/3)*i_star[:, 0], j_star**(-4/3)*i_star[:, 1]], axis = -1)
+        j_inducing = jnp.sqrt(self.inducing_points[:, 2] + 1e-9)
+        inducing_points_dev = jnp.stack([j_inducing**(-2/3)*self.inducing_points[:, 0], j_inducing**(-4/3)*self.inducing_points[:, 1]], axis = -1)
+        Kzz = matern52_kernel(inducing_points_dev, inducing_points_dev, self.params["variance"], self.params["lengthscales"])
+        Kzz += 1e-6 * jnp.eye(inducing_points_dev.shape[0])
+        Kiz = matern52_kernel(i_star_dev, inducing_points_dev, self.params["variance"], self.params["lengthscales"])
+        Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(inducing_points_dev.shape[0]))
+
+        latent_var_mean = Kiz @ Kzz_inv @ self.params["learnable_latent_energy"]
+        # covariance_latent = 
+        return jnp.log(1 + jnp.exp(latent_var_mean))
+    def psi_dev_std(self, deformation_gradient, S_recovered):
+        i_star, di_df = jax.vmap(invariants_and_derivatives)(deformation_gradient)
+        i_star = jnp.atleast_2d(i_star)
+        j_star = jnp.sqrt(i_star[:, 2] + 1e-9)
+        i_star_dev = jnp.stack([j_star**(-2/3)*i_star[:, 0], j_star**(-4/3)*i_star[:, 1]], axis = -1)
+        j_inducing = jnp.sqrt(self.inducing_points[:, 2] + 1e-9)
+        inducing_points_dev = jnp.stack([j_inducing**(-2/3)*self.inducing_points[:, 0], j_inducing**(-4/3)*self.inducing_points[:, 1]], axis = -1)
+        Kzz = matern52_kernel(inducing_points_dev, inducing_points_dev, self.params["variance"], self.params["lengthscales"])
+        Kzz += 1e-6 * jnp.eye(inducing_points_dev.shape[0])
+        Kiz = matern52_kernel(i_star_dev, inducing_points_dev, self.params["variance"], self.params["lengthscales"])
+        Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(inducing_points_dev.shape[0]))
+        
+        v = Kiz @ Kzz_inv
+        # Variance in the latent space (g)
+        var_g = self.params['variance'] - jnp.squeeze(v @ (Kzz - S_recovered) @ v.T)
+        
+        # Propagate to Psi space via Delta Method
+        mu_g = jnp.squeeze(v @ self.params["learnable_latent_energy"])
+        grad_psi = jax.nn.sigmoid(mu_g) # Derivative of softplus
+        
+        std_psi = grad_psi * jnp.sqrt(jnp.maximum(var_g, 1e-9))
+        std_psi_vec = jnp.diag(std_psi)
+        return std_psi_vec
+    def psi_dev_(self, i_star) :
+        '''
+        single call of strain energy function for using with jax.grad, jax.vmap, etc.
+
+        :param self: Description
+        :param i_star: Description
+        '''
+        
+        Psi_I = self.psi_dev(i_star).squeeze()
+        return Psi_I
+    def psi_vol_(self, i_star) :
+        # return jnp.exp(self.params["log_growth_constant"]) * (jnp.sqrt(i_star[2]) - 1) ** 2
+        return jnp.exp(self.params["log_growth_constant"]) * jnp.log(i_star[2]) ** 2 
+    def psi_gp(self, i_star) :
+        return self.psi_dev_(i_star) + self.psi_vol_(i_star)
+    def dPsi_gp_dF(self, deformation_gradient) :
+        I, dI_dF = invariants_and_derivatives(deformation_gradient)
+        dPsi_dI = jax.grad(self.psi_gp)(I)
+        dPsi_gp_dF = jnp.einsum("nij, n -> ij", dI_dF, dPsi_dI)
+        return dPsi_gp_dF
+    def psi(self, deformation_gradient) :
+
+        i_star, di_df = invariants_and_derivatives(deformation_gradient)
+
+        E =  0.5 * (deformation_gradient.T @ deformation_gradient - jnp.eye(deformation_gradient.shape[-1]))
+
+        H = self.dPsi_gp_dF(jnp.eye(deformation_gradient.shape[-1]))
+        stress_correction = jnp.sum(H * E)
+        psi = self.psi_gp(i_star) - self.psi_gp(jnp.array([3.0, 3.0, 1.0])) - stress_correction
+        return psi
+    
+    def piola_stress(self, deformation_gradient) :
+        piola = jax.grad(self.psi)(deformation_gradient)
+        # H = self.dPsi_gp_dF(jnp.eye(deformation_gradient.shape[-1]))
+        # return self.dPsi_gp_dF(deformation_gradient) - H @ deformation_gradient
+        return piola

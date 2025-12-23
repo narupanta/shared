@@ -124,6 +124,26 @@ def sum_negative_conjugate_mll(posteriors, datasets):
     # Sum the result
     return jnp.sum(all_mlls)
 
+def fto3x3(f) :
+    f3x3 = jnp.array([[f[0,0], f[0,1], 0.0],
+                      [f[1,0], f[1,1], 0.0],
+                      [0.0, 0.0, 1.0]])
+    return f3x3
+
+@jax.vmap
+def transformation_jacobian(coords_elem) :
+    x1, y1 = coords_elem[0]
+    x2, y2 = coords_elem[1]
+    x3, y3 = coords_elem[2]
+
+    # Jacobian of shape function derivatives
+    J = jnp.array([
+        [x2 - x1, y2 - y1],
+        [x3 - x1, y3 - y1]
+    ])
+    return J
+
+@jax.vmap
 def deformation_gradient_element(coords_elem, disp_elem):
     x1, y1 = coords_elem[0]
     x2, y2 = coords_elem[1]
@@ -153,7 +173,7 @@ def deformation_gradient_element(coords_elem, disp_elem):
 
     # Deformation gradient
     F = jnp.eye(2) + gradu
-    return F
+    return F, dNdx
 
 import jax.numpy as jnp
 
@@ -168,3 +188,17 @@ def detrend_3d_jax(X, y):
     y_detrended = y - trend
 
     return y_detrended, beta, trend
+
+
+def invariants_and_derivatives(F):
+    f = fto3x3(F)
+    C = f.T @ f
+    I1 = jnp.trace(C)
+    I2 = 0.5 * (I1**2 - jnp.trace(C @ C))
+    I3 = jnp.linalg.det(C)
+    # derivatives wrt F (2x2)
+    dI1_dF = 2*f
+    dI2_dF = 2*(I1*f - f @ C)
+    dI3_dF = 2*jnp.linalg.det(f)**2 * jnp.linalg.inv(f).T
+    dI_dF = jnp.stack([dI1_dF, dI2_dF, dI3_dF])  # (3,2,2)
+    return jnp.array([I1, I2, I3]), dI_dF

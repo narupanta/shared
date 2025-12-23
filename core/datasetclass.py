@@ -307,7 +307,18 @@ class TestSpecimen :
         data = dict(F = F, P = P_from_mm, sigma = sigma, coeffs = coeffs, invariants = invariants)
         return data
         # return dict(deformation_gradient = f)
+class TractionDataset :
+    def __init__(self, data_dir: os.PathLike = "/home/mmdiscovery/shared/dataset/", mat_model: str = "NH", noise: float = 0.00):
+        self.data_dir = data_dir
+        self.noise = noise
+        self.mat_model = mat_model
+        self.mat_model_path = os.path.join(data_dir, mat_model)
+        self.files = os.listdir(self.mat_model_path)
+    def __getitem__(self, idx) :
+        data = np.load(os.path.join(self.mat_model_path, self.files[idx]))
+        return data
 
+        
 # Example usage
 if __name__ == "__main__":
     dataset = BenchmarkDataset("dataset/benchmarks", "noise=low", "Isihara")
