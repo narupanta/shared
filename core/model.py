@@ -1,559 +1,13 @@
 # gpjax_version.py
 import os
-
-import numpy as np
-from flax import struct
 from flax.serialization import to_state_dict, from_state_dict
 from core.utils import *
 from core.datasetclass import *
 import jax.numpy as jnp
 import jax.random as jr
-# from sklearn.preprocessing import MinMaxScaler
 import pickle
-import gpjax as gpx
-import optax as ox
-from gpjax.kernels.computations import DenseKernelComputation
-from gpjax.mean_functions import AbstractMeanFunction
 key = jr.key(123)
-class MinMaxScaler:
-    """A minimal, JAX-compatible MinMaxScaler with small-epsilon safety."""
-
-    def __init__(self, feature_range=(0.0, 1.0), eps: float = 1e-8):
-        self.feature_range = feature_range
-        self.eps = eps
-        self.data_min_ = None
-        self.data_max_ = None
-        self.data_range_ = None
-
-    def fit(self, X):
-        X = jnp.asarray(X)
-        self.data_min_ = jnp.min(X, axis=0)
-        self.data_max_ = jnp.max(X, axis=0)
-        raw_range = self.data_max_ - self.data_min_
-        # avoid exact zero by using epsilon
-        self.data_range_ = jnp.where(jnp.abs(raw_range) < self.eps, 1.0, raw_range)
-        return self
-
-    def transform(self, X):
-        X = jnp.asarray(X)
-        scale = (self.feature_range[1] - self.feature_range[0]) / self.data_range_
-        X_scaled = (X - self.data_min_) * scale + self.feature_range[0]
-        return X_scaled
-
-    def inverse_transform(self, X):
-        X = jnp.asarray(X)
-        scale = (self.feature_range[1] - self.feature_range[0]) / self.data_range_
-        return (X - self.feature_range[0]) / scale + self.data_min_
-
-    def to_numpy_dict(self):
-        """Return a numpy-serializable dict for saving with pickle."""
-        return {
-            "feature_range": tuple(self.feature_range),
-            "data_min": np.asarray(self.data_min_),
-            "data_max": np.asarray(self.data_max_),
-            "data_range": np.asarray(self.data_range_),
-            "eps": float(self.eps),
-        }
-
-    @classmethod
-    def from_numpy_dict(cls, d):
-        scaler = cls(feature_range=d.get("feature_range", (0.0, 1.0)), eps=d.get("eps", 1e-8))
-        scaler.data_min_ = jnp.asarray(d["data_min"])
-        scaler.data_max_ = jnp.asarray(d["data_max"])
-        scaler.data_range_ = jnp.asarray(d["data_range"])
-        return scaler
-class TensorBasisGPModel:
-    def __init__(
-        self,
-        means: list[gpx.mean_functions.Zero],
-        kernels: list[gpx.kernels.RBF],
-        train_x=None,
-        train_y=None,
-    ):
-        self.number_gps = len(means)
-        self.means = means
-        self.kernels = kernels
-
-        # These start empty until user loads data
-        self.train_x = None
-        self.train_y = None
-        self.datapoints = None
-        self.priors = None
-        self.likelihoods = None
-        self.posteriors = None
-        self.opt_posteriors = None
-
-        # If data was passed, load immediately
-        if train_x is not None and train_y is not None:
-            self.load(train_x, train_y)
-
-    # ------------------------------------------------------
-    # LOAD TRAINING DATA LATER (lazy initialization)
-    # ------------------------------------------------------
-    def load(self, train_x, train_y):
-        """Load training data and create GP objects."""
-        self.train_x = train_x
-        self.train_y = train_y
-
-        # Create datasets for each GP output
-        self.datapoints = [
-            gpx.Dataset(X=train_x, y=train_y[:, i, None])
-            for i in range(self.number_gps)
-        ]
-
-        # Create priors
-        self.priors = [
-            gpx.gps.Prior(mean_function=mean, kernel=kernel)
-            for mean, kernel in zip(self.means, self.kernels)
-        ]
-
-        # Create likelihoods
-        self.likelihoods = [
-            gpx.likelihoods.Gaussian(
-                num_datapoints=self.datapoints[i].n,
-                obs_stddev=jnp.array(1e-3),
-            )
-            for i in range(self.number_gps)
-        ]
-
-        # Create initial posteriors (before optimization)
-        self.posteriors = [
-            prior * likelihood
-            for prior, likelihood in zip(self.priors, self.likelihoods)
-        ]
-
-        # Optimized posterior initially same as unoptimized
-        self.opt_posteriors = list(self.posteriors)
-
-    # ------------------------------------------------------
-    # OPTIMIZATION
-    # ------------------------------------------------------
-    def optimize_hyperparameters(self):
-        if self.datapoints is None:
-            raise ValueError("Training data not loaded. Call `load()` first.")
-
-        opt_posteriors = []
-        histories = []
-
-        for datapoint, posterior in zip(self.datapoints, self.posteriors):
-            opt_posterior, history = gpx.fit_scipy(
-                model=posterior,
-                objective=lambda p, d: -gpx.objectives.conjugate_mll(p, d),
-                train_data=datapoint,
-                trainable=gpx.parameters.Parameter,
-            )
-            opt_posteriors.append(opt_posterior)
-            histories.append(history)
-
-        self.opt_posteriors = opt_posteriors
-        return opt_posteriors, histories
-
-    # ------------------------------------------------------
-    # PREDICTION
-    # ------------------------------------------------------
-    def predict_coeffs(self, invariants):
-        if self.opt_posteriors is None:
-            raise ValueError("Model not trained — call optimize_hyperparameters().")
-
-        pred_means_list = []
-        pred_stds_list = []
-
-        for idx, opt_posterior in enumerate(self.opt_posteriors):
-            latent_dist = opt_posterior.predict(invariants, self.datapoints[idx])
-            predictive_dist = opt_posterior.likelihood(latent_dist)
-
-            predictive_mean = predictive_dist.mean
-            predictive_std = jnp.sqrt(predictive_dist.variance)
-
-            pred_means_list.append(predictive_mean)
-            pred_stds_list.append(predictive_std)
-
-        pred_means = jnp.stack(pred_means_list, axis=-1)
-        pred_stds = jnp.stack(pred_stds_list, axis=-1)
-
-        return pred_means, pred_stds
-
-    def predict_cauchy_stress(self, deformation_gradient):
-        b = B_func(deformation_gradient)
-
-        invariants = jnp.stack(
-            [I1_func(b), I2_func(b), I3_func(b)], axis=-1
-        )
-
-        coeff_means, coeff_stds = self.predict_coeffs(invariants)
-
-        c1, c2, c3 = coeff_means[..., 0], coeff_means[..., 1], coeff_means[..., 2]
-        s1, s2, s3 = coeff_stds[..., 0], coeff_stds[..., 1], coeff_stds[..., 2]
-
-        I = jnp.eye(3)
-
-        sigma_mean = (
-            c1[..., None, None] * I +
-            c2[..., None, None] * b +
-            c3[..., None, None] * (b @ b)
-        )
-
-        sigma_std = (
-            s1[..., None, None] * jnp.abs(I) +
-            s2[..., None, None] * jnp.abs(b) +
-            s3[..., None, None] * jnp.abs(b @ b)
-        )
-
-        return sigma_mean, sigma_std
-
-    def predict_piola_stress(self, deformation_gradient):
-        sigma_mean, sigma_std = self.predict_cauchy_stress(deformation_gradient)
-        detF = J_func(deformation_gradient)
-
-        FinvT = jnp.linalg.inv(jnp.swapaxes(deformation_gradient, -2, -1))
-
-        P_mean = detF[:, None, None] * (sigma_mean @ FinvT)
-        P_std = detF[:, None, None] * (sigma_std @ FinvT)
-
-        return P_mean, P_std
-
-    # ------------------------------------------------------
-    # SAVE MODEL
-    # ------------------------------------------------------
-    def save_model(self, save_path):
-        os.makedirs(save_path, exist_ok=True)
-
-        np.save(os.path.join(save_path, "train_x.npy"), np.asarray(self.train_x))
-        np.save(os.path.join(save_path, "train_y.npy"), np.asarray(self.train_y))
-
-        opt_posteriors_params_dict = to_state_dict(self.opt_posteriors)
-
-        with open(os.path.join(save_path, "opt_posterior_params.pkl"), "wb") as f:
-            pickle.dump(opt_posteriors_params_dict, f)
-
-    # ------------------------------------------------------
-    # LOAD MODEL
-    # ------------------------------------------------------
-    def load_model(self, model_path):
-        train_x = np.load(os.path.join(model_path, "train_x.npy"))
-        train_y = np.load(os.path.join(model_path, "train_y.npy"))
-
-        # Rebuild GP structure with priors, likelihoods, posteriors
-        self.load(train_x, train_y)
-
-        # Load optimized parameters
-        with open(os.path.join(model_path, "opt_posterior_params.pkl"), "rb") as f:
-            opt_posterior_params_dict = pickle.load(f)
-
-        # Rehydrate posterior tree
-        self.opt_posteriors = from_state_dict(self.opt_posteriors, opt_posterior_params_dict)
-
-
-class SVTBGPModel:
-    def __init__(self, train_x = None, train_y = None, incuding_points = None) :
-        self.train_x = None
-        self.train_y = None
-        self.datapoints = None
-        self.priors = None
-        self.likelihoods = None
-        self.posteriors = None
-        self.opt_posteriors = None
-        self.qs = None
-        self.incuding_points = None
-        if train_x is not None and train_y is not None and incuding_points is not None:
-            self.load(train_x, train_y, incuding_points)
-    # ------------------------------------------------------
-    # LOAD TRAINING DATA LATER (lazy initialization)
-    # ------------------------------------------------------
-    def load(self, train_x, train_y, incuding_points):
-        """Load training data and create GP objects."""
-        self.train_x = train_x
-        self.train_y = train_y
-        self.datapoints = [
-            gpx.Dataset(X=train_x, y=train_y[:, i, None])
-            for i in range(3)
-        ]
-        ini_lengthscale = jnp.std(train_x, axis = 0)
-        # ini_lengthscale = 0.1 * (jnp.max(train_x, axis = 0) - jnp.min(train_x, axis = 0)) 
-        # Create datasets for each GP output
-        mean = gpx.mean_functions.Zero()
-        kernel = gpx.kernels.Matern52(active_dims=[0,1,2], lengthscale = ini_lengthscale, n_dims=3)
-        # kernel = gpx.kernels.RationalQuadratic(active_dims=[0,1,2], lengthscale = ini_lengthscale, n_dims=3) 
-
-        self.priors = [
-            gpx.gps.Prior(mean_function=mean, kernel=kernel)
-        ] * 3
-
-        # Create likelihoods
-        self.likelihoods = [
-            gpx.likelihoods.Gaussian(
-                num_datapoints=self.datapoints[0].n,
-                obs_stddev=1
-            )
-        ] * 3
-
-        self.posteriors = [
-            prior * likelihood
-            for prior, likelihood in zip(self.priors, self.likelihoods)
-        ]
-        self.opt_posteriors = self.posteriors
-        
-        self.inducing_inputs = jnp.stack([jnp.linspace(jnp.min(self.train_x, axis = 0)[i], jnp.max(self.train_x, axis = 0)[i], incuding_points) 
-                                     for i in range(self.train_x.shape[1])])
-        self.qs = [gpx.variational_families.VariationalGaussian(posterior=p, inducing_inputs=self.inducing_inputs) for p in self.posteriors]
-    def optimization(self, num_iters) :
-        schedule = ox.warmup_cosine_decay_schedule(
-                                            init_value=0.00,
-                                            peak_value=0.02,
-                                            warmup_steps=75,
-                                            decay_steps=10000,
-                                            end_value=0.001,
-                                        )
-
-        opt_posteriors = []
-        histories = []
-        for q, d in zip(self.qs, self.datapoints) :
-            opt_posterior, history = gpx.fit(model=q,
-                    objective=lambda p, d: -gpx.objectives.elbo(p, d),
-                    train_data=d,
-                    optim=ox.adam(learning_rate=schedule),
-                    num_iters=num_iters,
-                    key=jr.key(42),
-                    batch_size=128,
-                    trainable=gpx.parameters.Parameter)
-            opt_posteriors.append(opt_posterior)
-            histories.append(history)
-        self.opt_posteriors = opt_posteriors
-        return opt_posteriors, histories
-    def predict_coeffs(self, invariants):
-        if self.opt_posteriors is None:
-            raise ValueError("Model not trained — call optimize_hyperparameters().")
-
-        pred_means_list = []
-        pred_stds_list = []
-
-        for idx, opt_posterior in enumerate(self.opt_posteriors):
-            latent_dist = opt_posterior(invariants)
-            predictive_dist = opt_posterior.posterior.likelihood(latent_dist)
-
-            predictive_mean = predictive_dist.mean
-            predictive_std = jnp.sqrt(predictive_dist.variance)
-
-            pred_means_list.append(predictive_mean)
-            pred_stds_list.append(predictive_std)
-
-        pred_means = jnp.stack(pred_means_list, axis=-1)
-        pred_stds = jnp.stack(pred_stds_list, axis=-1)
-
-        return pred_means, pred_stds
-
-    def predict_cauchy_stress(self, deformation_gradient):
-        b = B_func(deformation_gradient)
-
-        invariants = jnp.stack(
-            [I1_func(b), I2_func(b), I3_func(b)], axis=-1
-        )
-
-        coeff_means, coeff_stds = self.predict_coeffs(invariants)
-
-        c1, c2, c3 = coeff_means[..., 0], coeff_means[..., 1], coeff_means[..., 2]
-        s1, s2, s3 = coeff_stds[..., 0], coeff_stds[..., 1], coeff_stds[..., 2]
-
-        I = jnp.eye(3)
-
-        sigma_mean = (
-            c1[..., None, None] * I +
-            c2[..., None, None] * b +
-            c3[..., None, None] * (b @ b)
-        )
-
-        sigma_std = (
-            s1[..., None, None] * jnp.abs(I) +
-            s2[..., None, None] * jnp.abs(b) +
-            s3[..., None, None] * jnp.abs(b @ b)
-        )
-
-        return sigma_mean, sigma_std
-
-    def predict_piola_stress(self, deformation_gradient):
-        sigma_mean, sigma_std = self.predict_cauchy_stress(deformation_gradient)
-        detF = J_func(deformation_gradient)
-
-        FinvT = jnp.linalg.inv(jnp.swapaxes(deformation_gradient, -2, -1))
-
-        P_mean = detF[:, None, None] * (sigma_mean @ FinvT)
-        P_std = detF[:, None, None] * (sigma_std @ FinvT)
-
-        return P_mean, P_std
     
-    def save_model(self, save_path):
-        os.makedirs(save_path, exist_ok=True)
-
-        np.save(os.path.join(save_path, "train_x.npy"), np.asarray(self.train_x))
-        np.save(os.path.join(save_path, "train_y.npy"), np.asarray(self.train_y))
-
-        opt_posteriors_params_dict = to_state_dict(self.opt_posteriors)
-
-        with open(os.path.join(save_path, "opt_posterior_params.pkl"), "wb") as f:
-            pickle.dump(opt_posteriors_params_dict, f)
-
-    # ------------------------------------------------------
-    # LOAD MODEL
-    # ------------------------------------------------------
-    def load_model(self, model_path):
-        train_x = np.load(os.path.join(model_path, "train_x.npy"))
-        train_y = np.load(os.path.join(model_path, "train_y.npy"))
-        # Rebuild GP structure with priors, likelihoods, posteriors
-        self.load(train_x, train_y, 50)
-
-        # Load optimized parameters
-        with open(os.path.join(model_path, "opt_posterior_params.pkl"), "rb") as f:
-            opt_posterior_params_dict = pickle.load(f)
-
-        # Rehydrate posterior tree
-        self.opt_posteriors = from_state_dict(self.opt_posteriors, opt_posterior_params_dict)
-
-
-class CoefficientKernel(gpx.kernels.AbstractKernel):
-    def __init__(
-        self,
-        kernel1: gpx.kernels.AbstractKernel = gpx.kernels.RBF(active_dims=[0, 1, 2]),
-        kernel2: gpx.kernels.AbstractKernel = gpx.kernels.RBF(active_dims=[0, 1, 2]),
-        kernel3: gpx.kernels.AbstractKernel = gpx.kernels.RBF(active_dims=[0, 1, 2]),
-    ):
-        self.kernel1 = kernel1
-        self.kernel2 = kernel2
-        self.kernel3 = kernel3 
-        super().__init__(compute_engine=DenseKernelComputation())
-
-    def __call__(self, X, Xp):
-        # standard RBF-SE kernel is x and x' are on the same output, otherwise returns 0
-
-        z = jnp.array(X[3], dtype=int)
-        zp = jnp.array(Xp[3], dtype=int)
-
-        # achieve the correct value via 'switches' that are either 1 or 0
-        k1_switch = (z == 0) * (zp == 0)
-        k2_switch = (z == 1) * (zp == 1)
-        k3_switch = (z == 2) * (zp == 2)
-
-        return  k1_switch * self.kernel1(X, Xp) + k2_switch * self.kernel2(X, Xp) + k3_switch * self.kernel3(X, Xp)
-    
-class SVTBGPModelCK :
-    def __init__(self, train_x = None, train_y = None, incuding_points = None) :
-        self.train_x = None
-        self.train_y = None
-        self.datapoints = None
-        self.priors = None
-        self.likelihoods = None
-        self.posteriors = None
-        self.opt_posteriors = None
-        self.qs = None
-        self.incuding_points = None
-        if train_x is not None and train_y is not None and incuding_points is not None:
-            self.load(train_x, train_y, incuding_points)
-    # ------------------------------------------------------
-    # LOAD TRAINING DATA LATER (lazy initialization)
-    # ------------------------------------------------------
-    def load(self, train_x, train_y, incuding_points):
-        """Load training data and create GP objects."""
-        self.train_x = train_x
-        self.train_y = train_y
-        self.datapoints = [
-            gpx.Dataset(X=train_x, y=train_y[:, i, None])
-            for i in range(3)
-        ]
-        ini_lengthscale = jnp.std(train_x, axis = 0)
-        # ini_lengthscale = 0.1 * (jnp.max(train_x, axis = 0) - jnp.min(train_x, axis = 0)) 
-        # Create datasets for each GP output
-        mean = gpx.mean_functions.Zero()
-        kernel = gpx.kernels.RBF(active_dims=[0,1,2], lengthscale = ini_lengthscale, n_dims=3) + gpx.kernels.Polynomial(active_dims=[0, 1, 2], degree = 2, n_dims = 3)
-        # kernel = gpx.kernels.RationalQuadratic(active_dims=[0,1,2], lengthscale = ini_lengthscale, n_dims=3) 
-
-        self.priors = [
-            gpx.gps.Prior(mean_function=mean, kernel=kernel)
-        ] * 3
-
-        # Create likelihoods
-        self.likelihoods = [
-            gpx.likelihoods.Gaussian(
-                num_datapoints=self.datapoints[0].n,
-                obs_stddev=1
-            )
-        ] * 3
-
-        self.posteriors = [
-            prior * likelihood
-            for prior, likelihood in zip(self.priors, self.likelihoods)
-        ]
-        self.opt_posteriors = self.posteriors
-        
-        self.inducing_inputs = jnp.stack([jnp.linspace(jnp.min(self.train_x, axis = 0)[i], jnp.max(self.train_x, axis = 0)[i], incuding_points) 
-                                     for i in range(self.train_x.shape[1])])
-        self.qs = [gpx.variational_families.VariationalGaussian(posterior=p, inducing_inputs=self.inducing_inputs) for p in self.posteriors]
-    def optimization(self, num_iters) :
-        schedule = ox.warmup_cosine_decay_schedule(
-                                            init_value=0.00,
-                                            peak_value=0.02,
-                                            warmup_steps=75,
-                                            decay_steps=10000,
-                                            end_value=0.001,
-                                        )
-
-        opt_posteriors = []
-        histories = []
-        for q, d in zip(self.qs, self.datapoints) :
-            opt_posterior, history = gpx.fit(model=q,
-                    objective=lambda p, d: -gpx.objectives.elbo(p, d),
-                    train_data=d,
-                    optim=ox.adam(learning_rate=schedule),
-                    num_iters=num_iters,
-                    key=jr.key(42),
-                    batch_size=128,
-                    trainable=gpx.parameters.Parameter)
-            opt_posteriors.append(opt_posterior)
-            histories.append(history)
-        self.opt_posteriors = opt_posteriors
-        return opt_posteriors, histories
-    
-
-class NHPriorFunc :
-    def __init__(self, mu=0.5, kappa=1.0):
-        self.mu = mu
-        self.kappa = kappa
-    def __call__(self, x):
-        """
-        x : shape (N, d)
-        returns mean : shape (N, 1)
-        """
-        I1 = x[0]
-        I3 = x[2]
-
-        return (
-            self.mu / 2.0 * (I3**(-1/3)*I1 - 3.0)
-            + self.kappa / 2.0 * (jnp.sqrt(I3) - 1.0) ** 2
-        )  
-    
-class NHPrior(AbstractMeanFunction):
-    def __init__(self, mu=1.0, kappa=3.0):
-        super().__init__()
-
-        self.mu = mu
-        self.kappa = kappa
-        self.prior_mean_func = NHPriorFunc(self.mu, self.kappa)
-    # @jax.vmap
-    def __call__(self, x):
-        """
-        x : shape (N, d)
-        returns mean : shape (N, 1)
-        """
-        return jax.vmap(self.prior_mean_func)(x)
-    
-class StrainGPModel :
-    def __init__(self) :
-        self.mean_func = NHPrior()
-        self.kernel = gpx.kernels.RBF(active_dims=[0,1,2], lengthscale=[1.0,2.0,3.0],n_dims = 3)  # 1-dimensional input
-        self.prior = gpx.gps.Prior(mean_function=self.mean_func, kernel=self.kernel)
-    def sample_prior(self, test_input) :
-        return self.prior(test_input, return_covariance_type="dense")
-    
-
-
 import jax.numpy as jnp
 import jax
 
@@ -565,6 +19,8 @@ def rbf_kernel(X1: jnp.array, X2: jnp.array, variance: float, lengthscales: jnp.
     lengthscales is a vector (D,).
     """
     # 1. Calculate the raw difference tensor: (N, M, D)
+    X1 = jnp.atleast_2d(X1)
+    X2 = jnp.atleast_2d(X2)
     diff = X1[:, None, :] - X2[None, :, :]
     
     # 2. Apply the weighted (inverse lengthscale squared) distance for each dimension
@@ -584,6 +40,8 @@ def matern52_kernel(X1: jnp.array, X2: jnp.array, variance: float, lengthscales:
     """
     # 1. Scaled squared difference: sum_d ( (x_d - x'_d) / l_d )^2
     # This represents the squared Mahalanobis distance
+    X1 = jnp.atleast_2d(X1)
+    X2 = jnp.atleast_2d(X2)
     diff = X1[:, None, :] - X2[None, :, :]
     dist_sq = jnp.sum((diff / lengthscales)**2, axis=-1)
     
@@ -597,89 +55,111 @@ def matern52_kernel(X1: jnp.array, X2: jnp.array, variance: float, lengthscales:
     
     return K
 
+def polynom_kernel(X1, X2, sigma_poly, offset, degree) :
+    dot = X1 @ X2.T
+    K_poly = sigma_poly * (dot + offset)**degree
+    return K_poly
+
+def discovery_kernel(X1, X2, params):
+
+    K_matern = matern52_kernel(X1, X2, jnp.exp(params["log_scale_variance"]), params["lengthscales"])
+    K_poly = polynom_kernel(X1, X2, jnp.exp(params["log_sigma_poly"]), jnp.exp(params["log_offset"]), params["poly_degree"])
+
+    return K_poly + K_matern
+
 class SparseHyperelasticityGP :
     '''get g latent energy which will be joint gaussian with latent energy at testpoint'''
-    def __init__(self, lengthscales, variance, growth_constant, learnable_latent_energy, inducing_points) :
-        self.inducing_points = inducing_points
-        self.params = {"lengthscales" : lengthscales, "variance" : variance, "learnable_latent_energy": learnable_latent_energy, "log_growth_constant": growth_constant}
-    def get_kernel_matrix(self, X1, X2) :
-        return rbf_kernel(X1, X2, self.params["variance"], self.params["lengthscales"])
-    def psi_dev(self, i_star):
+    def __init__(self, lengthscales, scaling_variance, sigma_poly, offset, growth_constant, poly_degree, inducing_latent_variable, inducing_invariants) :
+        self.inducing_invariants = inducing_invariants
+        self.params = {"lengthscales" : lengthscales, 
+                       "scaling_variance" : scaling_variance, 
+                       "inducing_latent_variable": inducing_latent_variable, 
+                       "sigma_poly": sigma_poly, 
+                       "offset": offset, 
+                       "growth_constant": growth_constant, 
+                       "poly_degree": poly_degree}
+
+    def psi_dev_gp(self, i_star):
         '''
         __call__ : evaluate mean Physical Strain Energy Function at test point i_star
 
         :param self: Description
         :param i_star: Description
         '''
-        i_star = jnp.atleast_2d(i_star)
-        j_star = jnp.sqrt(i_star[:, 2] + 1e-9)
-        i_star_dev = jnp.stack([j_star**(-2/3)*i_star[:, 0], j_star**(-4/3)*i_star[:, 1]], axis = -1)
+        j_star = jnp.sqrt(i_star[2] + 1e-9)
+        i_star_dev = jnp.stack([j_star**(-2/3)*i_star[0], j_star**(-4/3)*i_star[1]], axis = -1)
         j_inducing = jnp.sqrt(self.inducing_points[:, 2] + 1e-9)
         inducing_points_dev = jnp.stack([j_inducing**(-2/3)*self.inducing_points[:, 0], j_inducing**(-4/3)*self.inducing_points[:, 1]], axis = -1)
-        Kzz = matern52_kernel(inducing_points_dev, inducing_points_dev, self.params["variance"], self.params["lengthscales"])
+        # inducing_points_dev = self.inducing_points
+        Kzz = discovery_kernel(inducing_points_dev, inducing_points_dev, self.params)
+        # Kzz = matern52_kernel(inducing_points_dev, inducing_points_dev, scale_variance, self.params["lengthscales"])
         Kzz += 1e-6 * jnp.eye(inducing_points_dev.shape[0])
-        Kiz = matern52_kernel(i_star_dev, inducing_points_dev, self.params["variance"], self.params["lengthscales"])
+        # Kiz = matern52_kernel(i_star_dev, inducing_points_dev, scale_variance, self.params["lengthscales"])
+        Kiz = discovery_kernel(i_star_dev, inducing_points_dev, self.params)
         Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(inducing_points_dev.shape[0]))
-
+        latent_var_mean = Kiz @ Kzz_inv @ (self.params["learnable_latent_energy"])
+        return (jnp.log(1 + jnp.exp(latent_var_mean))).squeeze() 
+    def psi_vol_gp(self, i_star):
+        j_star = jnp.sqrt(i_star[2] + 1e-9)
+        return jnp.exp(self.params["log_growth_constant"]) * (j_star - 1)**2
+    def psi_gp_f(self, f) :
+        i_star, _ = invariants_and_derivatives(f)
+        return self.psi_dev_gp(i_star) + self.psi_vol_gp(i_star)
+    def psi_dev_std(self, deformation_gradient, params):
+        i_star, di_df = invariants_and_derivatives(deformation_gradient)
+        j_star = jnp.sqrt(i_star[2] + 1e-9)
+        i_star_dev = jnp.stack([j_star**(-2/3)*i_star[0], j_star**(-4/3)*i_star[1]], axis = -1)
+        # 1. Setup Matrices
+        j_inducing = jnp.sqrt(self.inducing_points[:, 2] + 1e-9)
+        inducing_points_dev = jnp.stack([j_inducing**(-2/3)*self.inducing_points[:, 0], j_inducing**(-4/3)*self.inducing_points[:, 1]], axis = -1)
+        Kzz = discovery_kernel(inducing_points_dev, inducing_points_dev, self.params)
+        # Kzz = matern52_kernel(inducing_points_dev, inducing_points_dev, scale_variance, self.params["lengthscales"])
+        Kzz += 1e-6 * jnp.eye(inducing_points_dev.shape[0])
+        # Kiz = matern52_kernel(i_star_dev, inducing_points_dev, scale_variance, self.params["lengthscales"])
+        Kiz = discovery_kernel(i_star_dev, inducing_points_dev, self.params)
+        Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(inducing_points_dev.shape[0]))
+        L_K = jnp.linalg.cholesky(Kzz)
+        
+        # 3. Compute Predictive Variance
+        # Part A: Solve L_K * v = Kzx  => v = L_K^-1 * Kzx
+        v = jax.lax.linalg.triangular_solve(L_K, Kiz, lower=True)
+        
+        # Part B: Standard GP Variance (Prior - Info gain)
+        # diag(Kxx - v.T @ v)
+        kxx = discovery_kernel(i_star_dev, i_star_dev, self.params)
+        
+        var_standard = kxx - Kiz @ Kzz_inv @ Kiz.T
+        
+        # Part C: Learned Uncertainty contribution
+        # Solve L_K * w = L_S  (if you have full matrix L_S)
+        # This represents Kzz^-1 * S_uu * Kzz^-1 term
+        L_S = jnp.exp(params['g_log_var']) 
+        # L_S = params['L_S'] # (M, M)
+        S_uu = jnp.diag(L_S)
+        
+        # Compute Kxz * Kzz^-1 * S_uu * Kzz^-1 * Kzx
+        # Which is (v.T @ L_K^-1) @ S_uu @ (L_K^-T @ v)
+        # Or more simply:
+        # tmp = jax.lax.linalg.triangular_solve(L_K.T, v, lower=False)
+        var_learned = Kiz @ Kzz_inv @ S_uu @ Kzz_inv @ Kiz.T
+        
+        g_var = var_standard + var_learned
+        Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(inducing_points_dev.shape[0]))
         latent_var_mean = Kiz @ Kzz_inv @ self.params["learnable_latent_energy"]
-        # covariance_latent = 
-        return jnp.log(1 + jnp.exp(latent_var_mean))
-    def psi_dev_std(self, deformation_gradient, S_recovered):
-        i_star, di_df = jax.vmap(invariants_and_derivatives)(deformation_gradient)
-        i_star = jnp.atleast_2d(i_star)
-        j_star = jnp.sqrt(i_star[:, 2] + 1e-9)
-        i_star_dev = jnp.stack([j_star**(-2/3)*i_star[:, 0], j_star**(-4/3)*i_star[:, 1]], axis = -1)
-        j_inducing = jnp.sqrt(self.inducing_points[:, 2] + 1e-9)
-        inducing_points_dev = jnp.stack([j_inducing**(-2/3)*self.inducing_points[:, 0], j_inducing**(-4/3)*self.inducing_points[:, 1]], axis = -1)
-        Kzz = matern52_kernel(inducing_points_dev, inducing_points_dev, self.params["variance"], self.params["lengthscales"])
-        Kzz += 1e-6 * jnp.eye(inducing_points_dev.shape[0])
-        Kiz = matern52_kernel(i_star_dev, inducing_points_dev, self.params["variance"], self.params["lengthscales"])
-        Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(inducing_points_dev.shape[0]))
-        
-        v = Kiz @ Kzz_inv
-        # Variance in the latent space (g)
-        var_g = self.params['variance'] - jnp.squeeze(v @ (Kzz - S_recovered) @ v.T)
-        
-        # Propagate to Psi space via Delta Method
-        mu_g = jnp.squeeze(v @ self.params["learnable_latent_energy"])
-        grad_psi = jax.nn.sigmoid(mu_g) # Derivative of softplus
-        
-        std_psi = grad_psi * jnp.sqrt(jnp.maximum(var_g, 1e-9))
-        std_psi_vec = jnp.diag(std_psi)
-        return std_psi_vec
-    def psi_dev_(self, i_star) :
-        '''
-        single call of strain energy function for using with jax.grad, jax.vmap, etc.
-
-        :param self: Description
-        :param i_star: Description
-        '''
-        
-        Psi_I = self.psi_dev(i_star).squeeze()
-        return Psi_I
-    def psi_vol_(self, i_star) :
-        # return jnp.exp(self.params["log_growth_constant"]) * (jnp.sqrt(i_star[2]) - 1) ** 2
-        return jnp.exp(self.params["log_growth_constant"]) * jnp.log(i_star[2]) ** 2 
-    def psi_gp(self, i_star) :
-        return self.psi_dev_(i_star) + self.psi_vol_(i_star)
-    def dPsi_gp_dF(self, deformation_gradient) :
-        I, dI_dF = invariants_and_derivatives(deformation_gradient)
-        dPsi_dI = jax.grad(self.psi_gp)(I)
-        dPsi_gp_dF = jnp.einsum("nij, n -> ij", dI_dF, dPsi_dI)
-        return dPsi_gp_dF
+        psi_dev_var = ((jnp.exp(latent_var_mean)/(1 + jnp.exp(latent_var_mean)))**2 * g_var).squeeze()
+        # jax.debug.breakpoint()
+        return psi_dev_var
+    
     def psi(self, deformation_gradient) :
 
-        i_star, di_df = invariants_and_derivatives(deformation_gradient)
-
+        deformation_gradient_ref = jnp.eye(deformation_gradient.shape[-1])
         E =  0.5 * (deformation_gradient.T @ deformation_gradient - jnp.eye(deformation_gradient.shape[-1]))
 
-        H = self.dPsi_gp_dF(jnp.eye(deformation_gradient.shape[-1]))
+        H = jax.grad(self.psi_gp_f)(deformation_gradient_ref)
         stress_correction = jnp.sum(H * E)
-        psi = self.psi_gp(i_star) - self.psi_gp(jnp.array([3.0, 3.0, 1.0])) - stress_correction
+        psi = self.psi_gp_f(deformation_gradient) - self.psi_gp_f(deformation_gradient_ref) - stress_correction
         return psi
     
     def piola_stress(self, deformation_gradient) :
         piola = jax.grad(self.psi)(deformation_gradient)
-        # H = self.dPsi_gp_dF(jnp.eye(deformation_gradient.shape[-1]))
-        # return self.dPsi_gp_dF(deformation_gradient) - H @ deformation_gradient
         return piola

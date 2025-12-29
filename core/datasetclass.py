@@ -314,6 +314,8 @@ class TractionDataset :
         self.mat_model = mat_model
         self.mat_model_path = os.path.join(data_dir, mat_model)
         self.files = os.listdir(self.mat_model_path)
+    def __len__(self) :
+        return len(self.files)
     def __getitem__(self, idx) :
         data = np.load(os.path.join(self.mat_model_path, self.files[idx]))
         return data
