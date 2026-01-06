@@ -218,7 +218,41 @@ class Isihara(BaseMaterialModel):
         term4 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2 + term3 + term4
 
+@register_material("gentthomas")
+class GentThomas(BaseMaterialModel):
+    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        self.c1 = c1
+        self.c2 = c2
 
+    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+        C = C_func(F)
+        I1 = I1_func(C)
+        I2 = I2_func(C)
+        I3 = I3_func(C) 
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
+        term2 = jnp.log(I3_safe**(-2/3) * I2/3)
+        term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
+        return term1 + term2 + term3
+
+@register_material("mooneyrivlin")
+class GentThomas(BaseMaterialModel):
+    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        self.c1 = c1
+        self.c2 = c2
+
+    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+        C = C_func(F)
+        I1 = I1_func(C)
+        I2 = I2_func(C)
+        I3 = I3_func(C) 
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
+        term2 = 2.00 * (I3_safe**(-2/3) * I2 - 3)
+        term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
+        return term1 + term2 + term3
 
 # ------------------------------
 # Example small tests / usage

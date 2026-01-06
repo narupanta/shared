@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 from .utils import deformation_gradient_element, transformation_jacobian, invariants_and_derivatives, fto3x3
-from .model import SparseHyperelasticityGP, matern52_kernel, discovery_kernel
+from .model import SparseHyperelasticityGP, matern52_kernel, discovery_kernel, _dev_input
 
 def _neumann_cell_force(coords_el, types_el, t3, t4):
     """
@@ -48,7 +48,7 @@ def _neumann_cell_force(coords_el, types_el, t3, t4):
 
 
 def physical_loss(params, Z_I, coords, cells, u,
-                  n_nodes, node_type, load_parameter):
+                  n_nodes, node_type, load_parameter, key = None):
     """
     Virtual Field Method Weak form loss
     params: Hyperparameter of Gaussian Process
@@ -65,12 +65,11 @@ def physical_loss(params, Z_I, coords, cells, u,
     # --- INTERNAL FORCES (unchanged) ---
     F, dNdx = deformation_gradient_element(coords, u)   # (C,2,2), (C,3,2,2?) matches your API
     dA = jnp.linalg.det(transformation_jacobian(coords)) / 2  # (C,)
-    # params["g"] = params["g_mean"]
-    hyperGP = SparseHyperelasticityGP(params["lengthscales"], params["log_scale_variance"], params["log_sigma_poly"], params["log_offset"], params["log_growth_constant"],params["poly_degree"], params["g_mean"], Z_I)
-    f = jax.vmap(fto3x3)(F)
-    piola = jax.vmap(hyperGP.piola_stress)(f)[:, :2, :2]
 
-    # piola = piola_func(f)[:, :2, :2] 
+    hyperGP = SparseHyperelasticityGP(params, Z_I)
+    f = jax.vmap(fto3x3)(F)
+    piola = jax.vmap(lambda x: hyperGP.piola_stress(x, key))(f)[:, :2, :2]
+
     # internal element nodal forces: (C,3,2)
     f_int_cell = jnp.einsum("cij, cnj -> cin", piola, dNdx) * dA[:, None, None]
     f_int_cell = jnp.swapaxes(f_int_cell, 1, 2)    # (C,3,2)
@@ -98,74 +97,68 @@ def physical_loss(params, Z_I, coords, cells, u,
 
     # only free DOFs contribute to the residual loss (bc == 0)
     blm_loss = jnp.sum(R_nodes[(node_type != 1) & (node_type != 2)] ** 2)
-
+    # loss at the dirichlet nodes
     fixed_nodes_loss1 = jnp.sum((jnp.sum(R_nodes[node_type == 1], axis = 0) + jnp.sum(f_neu_nodes[node_type == 3], axis = 0))**2)
     fixed_nodes_loss2 = jnp.sum((jnp.sum(R_nodes[node_type == 2], axis = 0) + jnp.sum(f_neu_nodes[node_type == 4], axis = 0))**2)
 
-    return blm_loss + fixed_nodes_loss1 + fixed_nodes_loss2, (blm_loss, fixed_nodes_loss1, fixed_nodes_loss2)
+    total_physic_loss = blm_loss + fixed_nodes_loss1 + fixed_nodes_loss2
 
-def reparametrize(latent_mean, latent_log_var, key) :
-    eps = jax.random.normal(key, latent_mean.shape)
-    # u_sample = mean + Cholesky * noise
-    sample = latent_mean + jnp.exp(latent_log_var) @ eps
-    return sample
-
-import jax
-import jax.numpy as jnp
+    return total_physic_loss, (blm_loss, fixed_nodes_loss1, fixed_nodes_loss2)
 
 def calculate_kl_divergence(params, Z_I):
     """
     KL[q(u) || p(u)] where p(u) = N(0, Kuu) and q(u) = N(m_u, L_S L_S^T)
     """
-    m_u = params['g_mean']  # (M, 1)
-    L_S = jnp.exp(params['g_log_var'])  # (M, M) lower triangular Cholesky
-    # L_S = jnp.exp(jnp.ones_like(m_u) * -10)  # (M, M) lower triangular Cholesky
-    
-    scale_variance = jnp.exp(params["log_scale_variance"])
+    m_u = jnp.exp(params['log_inducing_latent_variable_mean'])  # (M, 1)
+    L_S = jnp.exp(params['log_inducing_latent_variable_var'])  # (M, M) lower triangular Cholesky
+    # Z_I = params[""]
+    params = {
+            "lengthscales" : params["lengthscales"], 
+            "sigma_scaling" : jnp.exp(params["log_sigma_scaling"]), 
+            "sigma_poly": jnp.exp(params["log_sigma_poly"]), 
+            "offset": params["offset"],
+            "growth_constant": jnp.exp(params["log_growth_constant"]), 
+            "poly_degree": params["poly_degree"],
+            # "inducing_invariants": params["inducing_invariants"],
+            # "inducing_invariants_dev": jax.vmap(_dev_input)(params["inducing_invariants"]),
+            "inducing_latent_variable_mean": jnp.exp(params["log_inducing_latent_variable_mean"]), 
+            "inducing_latent_variable_var": jnp.exp(params["log_inducing_latent_variable_var"]),
+            "p": params["p"],
+            "q": params["q"],
+            "r": params["r"],
+            "s": params["s"],
+            "t": params["t"],
+            "c": params["c"],
+            }
     j_inducing = jnp.sqrt(Z_I[:, 2] + 1e-9)
     inducing_points_dev = jnp.stack([j_inducing**(-2/3)*Z_I[:, 0], j_inducing**(-4/3)*Z_I[:, 1]], axis = -1)
-    # learnable_mean = jnp.exp(params["log_growth_constant1"]) * (inducing_points_dev[:, 0] - 3) + jnp.exp(params["log_growth_constant2"]) * (jnp.sqrt(inducing_points_dev[:, 2]) - 1)**2
+    inducing_points_dev = Z_I[:, :2]
+    # inducing_points_dev = params["inducing_invariants_dev"][:, :2]
     Kzz = discovery_kernel(inducing_points_dev, inducing_points_dev, params)
-    # 1. Compute Prior Covariance Kuu
-    Kzz = Kzz + 1e-6 * jnp.eye(Z_I.shape[0])
+    Kzz = Kzz + 1e-6 * jnp.eye(inducing_points_dev.shape[0])
 
     Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(inducing_points_dev.shape[0]))
-    # L_K = jnp.linalg.cholesky(Kuu)
-    
-    # 2. Trace Term: tr(Kuu^-1 * S)
-    # Solve L_K * V = L_S -> V = L_K^-1 * L_S. Then tr(V V^T)
-    # V = jax.lax.linalg.triangular_solve(L_K, L_S, lower=True)
     trace_term = jnp.trace(Kzz_inv @ jnp.diag(L_S))
-    
-    # 3. Mahalanobis Term: m_u^T * Kuu^-1 * m_u
-    # alpha = jax.lax.linalg.triangular_solve(L_K, m_u, lower=True)
-    # mahalanobis_term = jnp.sum(jnp.square(alpha))
     mahalanobis_term = m_u @ Kzz_inv @ m_u.T
     
-    # 4. Log-determinant Term: ln |Kuu| - ln |S|
     log_det_K = jnp.log(jnp.linalg.det(Kzz))
     log_det_S = jnp.log(jnp.linalg.det(jnp.diag(L_S)))
     
-    M = Z_I.shape[0]
+    M = inducing_points_dev.shape[0]
     kl = 0.5 * (trace_term + mahalanobis_term - M + log_det_K - log_det_S)
-    # jax.debug.breakpoint()
     return kl
 
 def elbo_loss(params, Z_I, coords, cells, u, n_nodes, node_type, load_parameter, key):
     # Unpack parameters for clarity
-    # lengthscales = params["lengthscales"]
-    # variance = params["variance"]
-    # growth_constant = params["growth_constant"]
-    g_mean = params["g_mean"]
+
+    # sigma_physic = 1e-3
     sigma_physic = jnp.exp(params["log_sigma_physic"])
+    physic_loss, _ = physical_loss(params, Z_I, coords, cells, u,
+                  n_nodes, node_type, load_parameter, key)
 
-    params["g"] = reparametrize(g_mean, params["g_log_var"], key)
-    # params["g"] = g_mean
-    physic_loss = physical_loss(params, Z_I, coords, cells, u,
-                  n_nodes, node_type, load_parameter)
-
-    log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * physic_loss - n_nodes * jnp.log(2 * jnp.pi * (sigma_physic**2))
-    kl_div = calculate_kl_divergence(params, Z_I)/ sigma_physic**2
+    log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * physic_loss - n_nodes/2.0 * jnp.log(2 * jnp.pi * (sigma_physic**2))
+    # log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * physic_loss
+    kl_div = calculate_kl_divergence(params, Z_I) * 5
     # jax.debug.breakpoint()
     elbo = log_likelihood - kl_div
     total_loss = -elbo
