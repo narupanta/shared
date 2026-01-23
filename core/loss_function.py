@@ -2,7 +2,8 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 from .utils import deformation_gradient_element, transformation_jacobian, invariants_and_derivatives, fto3x3
-from .model import SparseHyperelasticityGP, matern52_kernel, discovery_kernel, _dev_input
+from .model import SparseHyperelasticityGP, matern52_kernel, discovery_kernel, enforce_softplus_positive, transform_input_features
+
 
 def _neumann_cell_force(coords_el, types_el, t3, t4):
     """
@@ -47,7 +48,7 @@ def _neumann_cell_force(coords_el, types_el, t3, t4):
     return f_cell  # (3,2)
 
 
-def physical_loss(params, Z_I, coords, cells, u,
+def physical_loss(params, model, coords, cells, u,
                   n_nodes, node_type, load_parameter, key = None):
     """
     Virtual Field Method Weak form loss
@@ -66,9 +67,11 @@ def physical_loss(params, Z_I, coords, cells, u,
     F, dNdx = deformation_gradient_element(coords, u)   # (C,2,2), (C,3,2,2?) matches your API
     dA = jnp.linalg.det(transformation_jacobian(coords)) / 2  # (C,)
 
-    hyperGP = SparseHyperelasticityGP(params, Z_I)
+    hyperGP = model
+    hyperGP.params = hyperGP.load_params(params)
+    
     f = jax.vmap(fto3x3)(F)
-    piola = jax.vmap(lambda x: hyperGP.piola_stress(x, key))(f)[:, :2, :2]
+    piola = jax.vmap(lambda x: hyperGP.piola(x, key))(f)[:, :2, :2]
 
     # internal element nodal forces: (C,3,2)
     f_int_cell = jnp.einsum("cij, cnj -> cin", piola, dNdx) * dA[:, None, None]
@@ -79,7 +82,7 @@ def physical_loss(params, Z_I, coords, cells, u,
     
     # --- NEUMANN EDGE-LENGTH TRACTION ---
     # normalize load_parameter to flat array
-    t3 = load_parameter * 0.9# TO ADD ADJUSTABLE load_parameters
+    t3 = load_parameter * 0.99# TO ADD ADJUSTABLE load_parameters
     t4 = load_parameter  # TO ADD ADJUSTABLE load_parameters
     # node_type may be (n_nodes,1) so flatten
     node_type_flat = jnp.asarray(node_type).reshape(-1)  # (n_nodes,)
@@ -94,72 +97,83 @@ def physical_loss(params, Z_I, coords, cells, u,
 
     # --- Residual R = int(grad v : P) dx  -  int(v·T) ds(Neumann)
     R_nodes = f_int_nodes - f_neu_nodes
+    free_node = (node_type != 1) & (node_type != 2)
 
     # only free DOFs contribute to the residual loss (bc == 0)
-    blm_loss = jnp.sum(R_nodes[(node_type != 1) & (node_type != 2)] ** 2)
+    blm_loss = R_nodes[free_node] ** 2
     # loss at the dirichlet nodes
-    fixed_nodes_loss1 = jnp.sum((jnp.sum(R_nodes[node_type == 1], axis = 0) + jnp.sum(f_neu_nodes[node_type == 3], axis = 0))**2)
-    fixed_nodes_loss2 = jnp.sum((jnp.sum(R_nodes[node_type == 2], axis = 0) + jnp.sum(f_neu_nodes[node_type == 4], axis = 0))**2)
+    fixed_nodes_loss1 = jnp.sum((jnp.sum(f_int_nodes[node_type == 1], axis = 0) + jnp.sum(f_neu_nodes[node_type == 3], axis = 0))**2)
+    fixed_nodes_loss2 = jnp.sum((jnp.sum(f_int_nodes[node_type == 2], axis = 0) + jnp.sum(f_neu_nodes[node_type == 4], axis = 0))**2)
 
-    total_physic_loss = blm_loss + fixed_nodes_loss1 + fixed_nodes_loss2
+    # total_physic_loss = blm_loss + fixed_nodes_loss1 + fixed_nodes_loss2
+    free_loss = blm_loss
+    fix_loss = jnp.stack([fixed_nodes_loss1, fixed_nodes_loss2])
+    return free_loss, fix_loss
 
-    return total_physic_loss, (blm_loss, fixed_nodes_loss1, fixed_nodes_loss2)
-
-def calculate_kl_divergence(params, Z_I):
+def calculate_kl_divergence(params, model):
     """
     KL[q(u) || p(u)] where p(u) = N(0, Kuu) and q(u) = N(m_u, L_S L_S^T)
     """
-    m_u = jnp.exp(params['log_inducing_latent_variable_mean'])  # (M, 1)
-    L_S = jnp.exp(params['log_inducing_latent_variable_var'])  # (M, M) lower triangular Cholesky
-    # Z_I = params[""]
+    dev_z = model.inducing_points["dev_z"]
+    vol_z = model.inducing_points["vol_z"]
     params = {
-            "lengthscales" : params["lengthscales"], 
-            "sigma_scaling" : jnp.exp(params["log_sigma_scaling"]), 
-            "sigma_poly": jnp.exp(params["log_sigma_poly"]), 
-            "offset": params["offset"],
-            "growth_constant": jnp.exp(params["log_growth_constant"]), 
-            "poly_degree": params["poly_degree"],
-            # "inducing_invariants": params["inducing_invariants"],
-            # "inducing_invariants_dev": jax.vmap(_dev_input)(params["inducing_invariants"]),
-            "inducing_latent_variable_mean": jnp.exp(params["log_inducing_latent_variable_mean"]), 
-            "inducing_latent_variable_var": jnp.exp(params["log_inducing_latent_variable_var"]),
-            "p": params["p"],
-            "q": params["q"],
-            "r": params["r"],
-            "s": params["s"],
-            "t": params["t"],
-            "c": params["c"],
-            }
-    j_inducing = jnp.sqrt(Z_I[:, 2] + 1e-9)
-    inducing_points_dev = jnp.stack([j_inducing**(-2/3)*Z_I[:, 0], j_inducing**(-4/3)*Z_I[:, 1]], axis = -1)
-    inducing_points_dev = Z_I[:, :2]
-    # inducing_points_dev = params["inducing_invariants_dev"][:, :2]
-    Kzz = discovery_kernel(inducing_points_dev, inducing_points_dev, params)
-    Kzz = Kzz + 1e-6 * jnp.eye(inducing_points_dev.shape[0])
+            "dev_gp_lengthscales" : jnp.exp(params["raw_dev_gp_lengthscales"]), 
+            "vol_gp_lengthscales" : jnp.exp(params["raw_vol_gp_lengthscales"]), 
+            "dev_gp_sigma_scaling" : jnp.exp(params["raw_dev_gp_sigma_scaling"]),
+            "vol_gp_sigma_scaling" : jnp.exp(params["raw_vol_gp_sigma_scaling"]),
+            "dev_u_mean" : enforce_softplus_positive(params["raw_dev_u_mean"]),
+            "dev_u_var" : enforce_softplus_positive(params["raw_dev_u_var"]),
+            "vol_u_mean" : enforce_softplus_positive(params["raw_vol_u_mean"]),
+            "vol_u_var" : enforce_softplus_positive(params["raw_vol_u_var"]),
+            "p": enforce_softplus_positive(params["raw_p"]),
+            "q": enforce_softplus_positive(params["raw_q"]),
+            "r": enforce_softplus_positive(params["raw_r"]),
+            "s": enforce_softplus_positive(params["raw_s"]),
+            "t": enforce_softplus_positive(params["raw_t"]),
+            "c": enforce_softplus_positive(params["raw_c"]),
+            "a": enforce_softplus_positive(params["raw_a"])
+        }
 
-    Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(inducing_points_dev.shape[0]))
-    trace_term = jnp.trace(Kzz_inv @ jnp.diag(L_S))
-    mahalanobis_term = m_u @ Kzz_inv @ m_u.T
-    
-    log_det_K = jnp.log(jnp.linalg.det(Kzz))
-    log_det_S = jnp.log(jnp.linalg.det(jnp.diag(L_S)))
-    
-    M = inducing_points_dev.shape[0]
-    kl = 0.5 * (trace_term + mahalanobis_term - M + log_det_K - log_det_S)
-    return kl
+    def kl(u_mean, u_var, z, sigma_scaling, lengthscales) :
+        Kzz = discovery_kernel(z, z, sigma_scaling, lengthscales)
+        Kzz = Kzz + 1e-6 * jnp.eye(z.shape[0])
 
-def elbo_loss(params, Z_I, coords, cells, u, n_nodes, node_type, load_parameter, key):
+        Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0]))
+        trace_term = jnp.trace(Kzz_inv @ jnp.diag(u_var))
+        mahalanobis_term = u_mean @ Kzz_inv @ u_mean.T
+        
+        log_det_K = jnp.log(jnp.linalg.det(Kzz))
+        log_det_S = jnp.log(jnp.linalg.det(jnp.diag(u_var)))
+        
+        M = z.shape[0]
+        return 0.5 * (trace_term + mahalanobis_term - M + log_det_K - log_det_S)
+    kl_dev = kl(params["dev_u_mean"], params["dev_u_var"], dev_z, params["dev_gp_sigma_scaling"], params["dev_gp_lengthscales"])
+    kl_vol = kl(params["vol_u_mean"], params["vol_u_var"], vol_z, params["vol_gp_sigma_scaling"], params["vol_gp_lengthscales"])
+    return kl_dev + kl_vol
+
+def elbo_loss(params, model, coords, cells, u, n_nodes, node_type, load_parameter, key):
     # Unpack parameters for clarity
-
+    # dev_z = model.inducing_points.dev_z
+    # vol_z = model.inducing_points.vol_z
     # sigma_physic = 1e-3
     sigma_physic = jnp.exp(params["log_sigma_physic"])
-    physic_loss, _ = physical_loss(params, Z_I, coords, cells, u,
-                  n_nodes, node_type, load_parameter, key)
+    sigma_glob = jnp.exp(params["log_sigma_glob"])
 
-    log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * physic_loss - n_nodes/2.0 * jnp.log(2 * jnp.pi * (sigma_physic**2))
+    free_loss, fix_loss = physical_loss(params, model, coords, cells, u,
+                  n_nodes, node_type, load_parameter, key)
+    sum_free_loss = jnp.sum(free_loss)
+    sum_fix_loss = jnp.sum(fix_loss)
+    physic_loss = sum_free_loss + sum_fix_loss
+    free_dofs = free_loss.shape[0] * free_loss.shape[1]
+    fix_dim = 2
+    free_log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * sum_free_loss - free_dofs/2.0 * jnp.log(2 * jnp.pi * (sigma_physic**2))
+    fix_log_likelihood = - (1.0 / (2 * (sigma_glob**2))) * sum_fix_loss - fix_dim/2.0 * jnp.log(2 * jnp.pi * (sigma_glob**2))
+    log_likelihood = free_log_likelihood + fix_log_likelihood
     # log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * physic_loss
-    kl_div = calculate_kl_divergence(params, Z_I) * 5
+    kl_div = model.kl_divergance()
+    # kl_div = 0.0
     # jax.debug.breakpoint()
     elbo = log_likelihood - kl_div
+    # elbo = log_likelihood
     total_loss = -elbo
     return total_loss, (log_likelihood, kl_div, physic_loss)

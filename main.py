@@ -8,7 +8,7 @@ from jaxtyping import install_import_hook
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import optax
-from core.model import SparseHyperelasticityGP
+from core.model import SparseHyperelasticityGP, transform_input_features, enforce_softplus_positive
 from core.material_models import get_material
 import jax
 import jax.numpy as jnp
@@ -18,7 +18,10 @@ import os
 
 from core.datasetclass import TractionDataset
 from core.loss_function import physical_loss, elbo_loss
-from core.plotter import plot_loss_analysis, plot_parameters_hist, plot_r2_strain_energy_function, plot_ut_ebt_ps_uc_ebc_ss
+from core.plotter import \
+    plot_loss_analysis, \
+    plot_parameters_hist, \
+    plot_r2_strain_energy_function, plot_ut_ebt_ps_uc_ebc_ss, plot_inducing_points, plot_stress_validation
 
 # helper: per-element edge-based neumann traction contribution
 import os
@@ -27,20 +30,6 @@ import ast
 import numpy as np
 import matplotlib.pyplot as plt
 # from core.plotter import plot_loss_analysis, plot_parameters_hist
-
-@jax.vmap
-def invariants_and_derivatives(F):
-    f = fto3x3(F)
-    C = f.T @ f
-    I1 = jnp.trace(C)
-    I2 = 0.5 * (I1**2 - jnp.trace(C @ C))
-    I3 = jnp.linalg.det(C)
-    # derivatives wrt F (2x2)
-    dI1_dF = 2*f
-    dI2_dF = 2*(I1*f - f @ C)
-    dI3_dF = 2*jnp.linalg.det(f)**2 * jnp.linalg.inv(f).T
-    dI_dF = jnp.stack([dI1_dF, dI2_dF, dI3_dF])  # (3,2,2)
-    return jnp.array([I1, I2, I3]), dI_dF
 
 def farthest_point_sampling(pts, num_samples):
     """
@@ -87,34 +76,37 @@ if __name__ == "__main__" :
     os.makedirs(save_path, exist_ok=True)
     material_model = "isihara"
     dataset = TractionDataset("dataset",material_model)
-    data = dataset[-1]
-    coords = data["mesh_pos"][:,:2]
-    cells = data["cells"]
-    # u = data["u"]
-    percent_noise = 0.00005
-    node_type = data["node_type"]
-    ux = data["u"][:, 0]
-    ux[(data["node_type"] != 1)] += np.random.normal(0, percent_noise * 1, ux.shape)[(data["node_type"] != 1)]
-    uy = data["u"][:, 1]
-    uy[(data["node_type"] != 2)] += np.random.normal(0, percent_noise * 1, uy.shape)[(data["node_type"] != 2)]
+    F_all = []
+    for loadstep in range(len(dataset)) :
 
-    # Combine components into the full displacement vector u
-    u = np.column_stack((ux, uy))
-    # u[node_type == 0] = u[node_type == 0] + jax.random.normal(jr.key(0), u.shape)[node_type == 0] * 0.01 * mean_u
-    load_parameter = data["load_parameter"]
+        data = dataset[loadstep]
+        coords = data["mesh_pos"][:,:2]
+        cells = data["cells"]
+        # u = data["u"]
+        percent_noise = 5e-5
+        node_type = data["node_type"]
+        ux = data["u"][:, 0]
+        ux[(data["node_type"] != 1)] += np.random.normal(0, percent_noise * 1, ux.shape)[(data["node_type"] != 1)]
+        uy = data["u"][:, 1]
+        uy[(data["node_type"] != 2)] += np.random.normal(0, percent_noise * 1, uy.shape)[(data["node_type"] != 2)]
 
-    coord_cells = coords[cells]
-    u_cells = u[cells]
+        # Combine components into the full displacement vector u
+        u = np.column_stack((ux, uy))
+        # u[node_type == 0] = u[node_type == 0] + jax.random.normal(jr.key(0), u.shape)[node_type == 0] * 0.01 * mean_u
+        load_parameter = data["load_parameter"]
 
-    F, dNdx = deformation_gradient_element(coord_cells, u_cells)
-    
-    I_obs, _ = invariants_and_derivatives(F)
-    lscale_init = jnp.std(I_obs, axis = 0)
-    x = I_obs[:, 0] * I_obs[:, 2]**(-1/3)
-    y = I_obs[:, 1] * I_obs[:, 2]**(-2/3)
-    z = I_obs[:, 2]
-    I_obs_dev = jnp.stack([x, y, z], axis = -1)
-    
+        coord_cells = coords[cells]
+        u_cells = u[cells]
+
+        F, dNdx = deformation_gradient_element(coord_cells, u_cells)
+        F_all.append(F)
+    F_all_stacked = jnp.concat(F_all)
+    invariants_and_derivatives_vmap = jax.vmap(invariants_and_derivatives)
+    I_obs_all,_ = invariants_and_derivatives_vmap(F_all_stacked)
+    I_obs, _ = invariants_and_derivatives_vmap(F)
+
+    I_obs_dev, j = jax.vmap(transform_input_features)(I_obs)
+
     n_ip = 20
     # Z_i1 = jnp.linspace(I_obs[:, 0].min(), I_obs[:, 0].max(), n_ip)
     # Z_i2 = jnp.linspace(I_obs[:, 1].min(), I_obs[:, 1].max(), n_ip)
@@ -131,39 +123,72 @@ if __name__ == "__main__" :
     # kmeans = KMeans(n_clusters=n_ip, random_state=0).fit(I_obs)
     # Z_stacked = jnp.array(kmeans.cluster_centers_)
     Z_stacked = I_obs[farthest_point_sampling(I_obs, n_ip)]
+    dev_z = I_obs_dev[farthest_point_sampling(I_obs_dev, n_ip)]
+    vol_z = j[farthest_point_sampling(j, n_ip)]
+    plot_inducing_points(dev_z, vol_z, I_obs_dev, j, save_path)
+    # params = {
+    #     "log_lengthscales": jnp.log(lscale_init),
+    #     "log_sigma_scaling": jnp.array(1.0),
+    #     "log_sigma_poly": jnp.array(1.0),
+    #     "offset": jnp.array(1.0),
+    #     "log_growth_constant": jnp.array(1.0),
+    #     "poly_degree": 2.0,
+    #     # "inducing_invariants": Z_stacked,
+    #     "log_inducing_latent_variable_mean": jnp.ones((n_ip,)) * 0.0,
+    #     "log_inducing_latent_variable_var": jnp.ones((n_ip,)),
+    #     "log_sigma_physic": 1.0,
+    #     "p": 1.0,
+    #     "q": 1.0,
+    #     "r": 1.0,
+    #     "s": 1.0,
+    #     "t": 1.0,
+    #     "c": 1.0,
+    # }
 
-
-    params = {
-        "lengthscales": lscale_init[:2],
-        "log_sigma_scaling": jnp.array(1.0),
-        "log_sigma_poly": jnp.array(1.0),
-        "offset": jnp.array(1.0),
-        "log_growth_constant": jnp.array(1.0),
-        "poly_degree": 2.0,
-        # "inducing_invariants": Z_stacked,
-        "log_inducing_latent_variable_mean": jnp.ones((n_ip,)) * 0.0,
-        "log_inducing_latent_variable_var": jnp.ones((n_ip,)),
-        "log_sigma_physic": 1.0,
-        "p": 1.0,
-        "q": 1.0,
-        "r": 1.0,
-        "s": 1.0,
-        "t": 1.0,
-        "c": 1.0,
-    }
-
-    opt = optax.adam(1e-2)
-    opt_state = opt.init(params)
-    n_nodes = int(cells.max()) + 1
+    # schedule = optax.warmup_cosine_decay_schedule(
+    #     init_value=1e-2,
+    #     peak_value=1e-2,
+    #     warmup_steps=1000,
+    #     decay_steps=2000,
+    #     end_value=1e-5
+    # )
     # JIT the loss and gradients
     # loss_and_grad = jax.jit(jax.value_and_grad( # type: ignore
     #     lambda p: physical_loss(p, Z_stacked, coord_cells, cells, u_cells, coords.shape[0], node_type, load_parameter), 
     #             has_aux=True
     # ))
-    main_key = jr.PRNGKey(42)
 
+    params = {
+        "raw_dev_gp_lengthscales" : jnp.array([1.0, 1.0]), 
+        "raw_vol_gp_lengthscales" : jnp.array([1.0]), 
+        "raw_dev_gp_sigma_scaling" : 1.0,
+        "raw_vol_gp_sigma_scaling" : 1.0,
+        "raw_dev_z" : dev_z,
+        "raw_dev_u_mean" : jnp.zeros((n_ip,)),
+        "raw_dev_u_var" : jnp.ones((n_ip,)),
+        "raw_vol_z" : vol_z,
+        "raw_vol_u_mean" : jnp.zeros((n_ip,)),
+        "raw_vol_u_var" : jnp.ones((n_ip,)),
+        "log_sigma_physic": 1.0,
+        "log_sigma_glob": 1.0,
+        "raw_c20": 1.0,
+        "raw_c02": 1.0,
+        "raw_c11": 1.0,
+        "raw_c10": 1.0,
+        "raw_c01": 1.0,
+        "raw_k": 1.0,
+        "raw_q": 1.0
+    }
+
+    main_key = jr.PRNGKey(42)
+    model = SparseHyperelasticityGP(params, I_obs, n_ip)
+    # model_path = "/home/mmdiscovery/shared/saved_model/20260121T185159/" # Replace with the actual path to your saved model
+    # with open(os.path.join(model_path, "best_params.npy"), "rb") as f:
+    #     load_params = jnp.load(f, allow_pickle=True).item()
+    # model.load_params(load_params)
+    # params = load_params
     loss_and_grad = jax.jit(jax.value_and_grad(
-        lambda p, k: elbo_loss(p, Z_stacked, coord_cells, cells, u_cells, coords.shape[0], node_type, load_parameter, k),
+        lambda p, k: elbo_loss(p, model, coord_cells, cells, u_cells, coords.shape[0], node_type, load_parameter, k),
         has_aux=True
     ))
 
@@ -174,7 +199,15 @@ if __name__ == "__main__" :
     log_scale_variance_history = []
     best_params = None
     log_file_path = os.path.join(save_path, "optimization_log.txt")
-    
+    lr_schedule = optax.linear_schedule(
+        init_value=1e-3, 
+        end_value=1e-2, 
+        transition_steps=5000,
+        transition_begin=20000
+        )
+    opt = optax.adam(learning_rate=1e-2)
+    opt_state = opt.init(params)
+    n_nodes = int(cells.max()) + 1
     # Open once and clear (or just let the loop handle it)
     with open(log_file_path, "w") as f:
         f.write("Optimization Start\n" + "="*20 + "\n")
@@ -184,13 +217,16 @@ if __name__ == "__main__" :
 
     # Parameter history
     params_hist = {
-        "sigma_poly": [], "sigma_scaling": [], "lengthscales": [],
-        "offset": [], "degree": [], "sigma_physic": [], "inducing_mean": []
+        "dev_gp_sigma_scaling": [], "vol_gp_sigma_scaling": [],
+        "dev_gp_lengthscales": [], "vol_gp_lengthscales": [], 
+        "dev_u_mean": [], "dev_u_var": [], "vol_u_mean": [], "vol_u_var": [], "dev_z": [], "vol_z": [],
+        "sigma_physic": [], "c20": [], "c02": [], "c11": [], "c10": [], "c01": [], "k": [], "q": []
     }
-    for step in range(50000):
+    for step in range(100000):
         main_key, subkey = jr.split(main_key)
         
         (loss, (log_like_loss, kl_loss, phy_loss)), grads = loss_and_grad(params, subkey)
+    
         updates, opt_state = opt.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         
@@ -202,6 +238,7 @@ if __name__ == "__main__" :
         if step % 50 == 0:
             # Format the log entry
             log_message = (
+
                 f"step {step:04d} | loss={loss:.6f} | "
                 f"log_like={log_like_loss:.6f} | kl={kl_loss:.6f} | phy={phy_loss:.6f}\n"
             )
@@ -231,13 +268,28 @@ if __name__ == "__main__" :
             loss_components_hist["phy"].append(float(phy_loss))
             
             # Record Parameters (applying exp where necessary)
-            params_hist["sigma_poly"].append(np.exp(float(params["log_sigma_poly"])))
-            params_hist["sigma_scaling"].append(np.exp(float(params["log_sigma_scaling"])))
-            params_hist["lengthscales"].append(np.array(params["lengthscales"]))
-            params_hist["offset"].append(float(params["offset"]))
-            params_hist["degree"].append(float(params["poly_degree"]))
+            params_hist["dev_gp_sigma_scaling"].append(jnp.exp(params["raw_dev_gp_sigma_scaling"]))
+            params_hist["vol_gp_sigma_scaling"].append(jnp.exp(params["raw_vol_gp_sigma_scaling"]))
+            params_hist["dev_gp_lengthscales"].append(jnp.exp(params["raw_dev_gp_lengthscales"]))
+            params_hist["vol_gp_lengthscales"].append(jnp.exp(params["raw_vol_gp_lengthscales"]))
+            params_hist["dev_z"].append(3 + enforce_softplus_positive(params["raw_dev_z"]))
+            params_hist["vol_z"].append(enforce_softplus_positive(params["raw_vol_z"]))
+            params_hist["dev_u_mean"].append(enforce_softplus_positive(params["raw_dev_u_mean"]))
+            params_hist["dev_u_var"].append(enforce_softplus_positive(params["raw_dev_u_var"]))
+            params_hist["vol_u_mean"].append(enforce_softplus_positive(params["raw_vol_u_mean"]))
+            params_hist["vol_u_var"].append(enforce_softplus_positive(params["raw_vol_u_var"]))
             params_hist["sigma_physic"].append(np.exp(float(params["log_sigma_physic"])))
-            params_hist["inducing_mean"].append(np.array(jnp.exp(params["log_inducing_latent_variable_mean"])))
+            params_hist["c20"].append(enforce_softplus_positive(float(params["raw_c20"])))
+            params_hist["c02"].append(enforce_softplus_positive(float(params["raw_c02"])))
+            params_hist["c11"].append(enforce_softplus_positive(float(params["raw_c11"]))) 
+            params_hist["c10"].append(enforce_softplus_positive(float(params["raw_c10"])))
+            params_hist["c01"].append(enforce_softplus_positive(float(params["raw_c01"])))
+            params_hist["k"].append(enforce_softplus_positive(float(params["raw_k"])))
+            params_hist["q"].append(enforce_softplus_positive(float(params["raw_q"])))
+            
+
+
+
             # Keep your history lists updated
 
 
@@ -254,17 +306,22 @@ if __name__ == "__main__" :
     plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_path)
     plot_parameters_hist(params_hist, steps_history, save_path)
 
-    learned_gp = SparseHyperelasticityGP(best_params, Z_stacked)
+    learned_gp = SparseHyperelasticityGP(best_params, I_obs, n_ip)
 
     f = jax.vmap(fto3x3)(F)
-    psi_pred = jax.vmap(learned_gp.psi)(f)
-    psi_dev_pred = psi_pred - jax.vmap(learned_gp._psi_model_vol)(I_obs[:, 2])
-    psi_vol_pred = jax.vmap(learned_gp._psi_model_vol)(I_obs[:, 2])
+    psi_pred = jax.vmap(learned_gp.psi, in_axes=(0,None))(f, None)
+    dev_features, vol_features = jax.vmap(transform_input_features)(I_obs)
+    psi_dev_pred = jax.vmap(lambda f : learned_gp._predict_gp_component(f, "dev").mean)(dev_features).squeeze()
+    psi_vol_pred = jax.vmap(lambda f : learned_gp._predict_gp_component(f, "vol").mean)(vol_features).squeeze()
 
     true_model = get_material(material_model.lower())
     psi_true = true_model.phi(f)
-    psi_dev_true = psi_true - 1.5 * (jnp.sqrt(I_obs[:, 2]) - 1)**2
-    psi_vol_true = 1.5 * (jnp.sqrt(I_obs[:, 2]) - 1)**2
+    j = jnp.sqrt(I_obs[:, 2])
+    # psi_dev_true = 0.5 * (j **(-2/3) * I_obs[:, 0] - 3) + (j **(-2/3) * I_obs[:, 0] - 3)**2 + (j **(-4/3) * I_obs[:, 1] - 3)
+    psi_dev_true = psi_true - 1.5 * (j - 1)**2
+
+    psi_vol_true = 1.5 * (j - 1)**2
 
     plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_true, psi_vol_pred, psi_vol_true, save_path)
     plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path)
+    plot_stress_validation(learned_gp, true_model, save_path)

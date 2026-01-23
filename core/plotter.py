@@ -21,6 +21,7 @@ import jax.random as jr
 import jax
 import os
 from core.datasetclass import TractionDataset
+from core.utils import invariants_and_derivatives
 from core.loss_function import physical_loss, elbo_loss
 # helper: per-element edge-based neumann traction contribution
 import os
@@ -57,35 +58,122 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
 
     plt.tight_layout()
     fig1.savefig(os.path.join(save_path, "loss_and_physics.png"))
-def plot_parameters_hist(params_hist, steps_history, save_path) :
+
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+def plot_parameters_hist(params_hist, steps_history, save_path):
+    # --- FIGURE 1: Inducing Variables & Positions (2x3 Grid) ---
+    fig1, axes1 = plt.subplots(2, 3, figsize=(18, 10))
+    fig1.suptitle(r"Evolution of Inducing Variables and Positions ($Z, \mathbf{u}$)", fontsize=16)
+
+    # ROW 0: DEVIATORIC GP
+    # 0,0: Deviatoric Mean (m_dev)
+    axes1[0, 0].plot(steps_history, np.array(params_hist["dev_u_mean"]))
+    axes1[0, 0].set_title(r"Deviatoric Mean ($\mathbf{m}_{dev}$)")
     
-    # --- FIGURE 2: Parameters (2x3 Grid) ---
-    fig2, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig2.suptitle("Kernel Hyperparameters (Matern52 + Polynomial)", fontsize=14)
-    axes = axes.flatten()
+    # 0,1: Deviatoric Variance (S_dev)
+    axes1[0, 1].plot(steps_history, np.array(params_hist["dev_u_var"]))
+    axes1[0, 1].set_title(r"Deviatoric Variance ($\mathbf{S}_{dev}$)")
+    
+    # 0,2: Deviatoric Inducing Positions (dev_z)
+    # dev_z is (M, 2) -> We plot the first column (I1_bar) or a norm
+    # Applying the softplus transformation used in your model for accurate viz
+    dev_z_1 = np.array(params_hist["dev_z"])[:, :, 0]
+    dev_z_2 = np.array(params_hist["dev_z"])[:, :, 1]
+    axes1[0, 2].plot(steps_history, dev_z_1) 
+    axes1[0, 2].plot(steps_history, dev_z_2) # Plotting I1_bar positions
+    axes1[0, 2].set_title(r"Dev. Inducing Positions ($Z_{dev, I_1}$)")
 
-    keys = ["sigma_poly", "sigma_scaling", "lengthscales", "offset", "degree", "sigma_physic"]
-    titles = [r"$\sigma_{poly}$", r"$\sigma_{scaling}$", "Lengthscales", "Offset", "Poly Degree", r"$\sigma_{physic}$"]
+    # ROW 1: VOLUMETRIC GP
+    # 1,0: Volumetric Mean (m_vol)
+    axes1[1, 0].plot(steps_history, np.array(params_hist["vol_u_mean"]))
+    axes1[1, 0].set_title(r"Volumetric Mean ($\mathbf{m}_{vol}$)")
+    
+    # 1,1: Volumetric Variance (S_vol)
+    axes1[1, 1].plot(steps_history, np.array(params_hist["vol_u_var"]))
+    axes1[1, 1].set_title(r"Volumetric Variance ($\mathbf{S}_{vol}$)")
+    
+    # 1,2: Volumetric Inducing Positions (vol_z)
+    actual_vol_z = np.array(params_hist["vol_z"])[:, :, 0]
+    axes1[1, 2].plot(steps_history, actual_vol_z)
+    axes1[1, 2].set_title(r"Vol. Inducing Positions ($Z_{vol, J}$)")
 
-    for i, key in enumerate(keys):
-        axes[i].plot(steps_history, np.array(params_hist[key]))
-        axes[i].set_title(titles[i])
-        axes[i].grid(True, alpha=0.3)
-        if key == "sigma_physic" :
-            axes[i].set_yscale('log')
+    for ax in axes1.flatten():
+        ax.set_xlabel("Iteration Step")
+        ax.grid(True, alpha=0.3)
 
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig1.savefig(os.path.join(save_path, "inducing_state_evolution.png"))
 
-    plt.tight_layout()
-    fig2.savefig(os.path.join(save_path, "parameter_evolution.png"))
+    # --- FIGURE 2: Kernel Hyperparameters (2x2 Grid) ---
+    fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10))
+    fig2.suptitle("Evolution of Kernel Hyperparameters", fontsize=16)
 
-    # --- FIGURE 3: Inducing Latent Mean (Single plot) ---
-    plt.figure(figsize=(12, 6))
-    plt.plot(steps_history, np.array(params_hist["inducing_mean"]))
-    plt.title("Inducing Latent Variable Mean ($g$)")
-    plt.xlabel("Step")
-    plt.ylabel("Value")
-    plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(save_path, "inducing_latent_mean.png"))
+    # 0,0: Deviatoric Lengthscales
+    axes2[0, 0].plot(steps_history, np.array(params_hist["dev_gp_lengthscales"]))
+    axes2[0, 0].set_title(r"Deviatoric Lengthscales ($\ell_{dev}$)")
+    
+    # 0,1: Deviatoric Sigma Scaling
+    axes2[0, 1].plot(steps_history, np.array(params_hist["dev_gp_sigma_scaling"]))
+    axes2[0, 1].set_title(r"Deviatoric Signal Scale ($\sigma_{dev}$)")
+    
+    # 1,0: Volumetric Lengthscales
+    axes2[1, 0].plot(steps_history, np.array(params_hist["vol_gp_lengthscales"]))
+    axes2[1, 1].set_yscale('log') # Useful if lengthscales vary widely
+    axes2[1, 0].set_title(r"Volumetric Lengthscales ($\ell_{vol}$)")
+    
+    # 1,1: Volumetric Sigma Scaling
+    axes2[1, 1].plot(steps_history, np.array(params_hist["vol_gp_sigma_scaling"]))
+    axes2[1, 1].set_title(r"Volumetric Signal Scale ($\sigma_{vol}$)")
+
+    for ax in axes2.flatten():
+        ax.set_xlabel("Iteration Step")
+        ax.grid(True, alpha=0.3)
+        ax.set_ylabel("Value")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig2.savefig(os.path.join(save_path, "hyperparameters_evolution.png"))
+
+    # Optional: If you want to track the physics noise parameter separately:
+    if "sigma_physic" in params_hist:
+        plt.figure(figsize=(8, 4))
+        plt.plot(steps_history, np.array(params_hist["sigma_physic"]))
+        plt.title(r"Physics Residual Noise ($\sigma_{physic}$)")
+        plt.yscale('log')
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(save_path, "physics_noise_evolution.png"))
+
+    fig3, axes3 = plt.subplots(1, 2, figsize=(16, 6))
+    fig3.suptitle("Evolution of Trend Function (Mean) Parameters", fontsize=16)
+
+    # Subplot 1: Deviatoric Trend Parameters (c20, c02, c11, c10, c01)
+    dev_params = ["c10", "c01", "c20", "c02", "c11"]
+    for p in dev_params:
+        if p in params_hist:
+            axes3[0].plot(steps_history, np.array(params_hist[p]), label=fr"${p}$")
+    
+    axes3[0].set_title("Deviatoric Trend Parameters")
+    axes3[0].set_xlabel("Iteration Step")
+    axes3[0].set_ylabel("Value")
+    axes3[0].legend()
+    axes3[0].grid(True, alpha=0.3)
+
+    # Subplot 2: Volumetric Trend Parameters (k, q)
+    vol_params = ["k", "q"]
+    for p in vol_params:
+        if p in params_hist:
+            axes3[1].plot(steps_history, np.array(params_hist[p]), label=fr"${p}$")
+    
+    axes3[1].set_title("Volumetric Trend Parameters")
+    axes3[1].set_xlabel("Iteration Step")
+    axes3[1].set_ylabel("Value")
+    axes3[1].legend()
+    axes3[1].grid(True, alpha=0.3)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig3.savefig(os.path.join(save_path, "trend_parameters_evolution.png"))
 
 def plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_true, psi_vol_pred, psi_vol_true, save_path) :
     plt.figure(figsize=(8, 6))
@@ -170,6 +258,12 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path):
 
     # JIT compile the vmapped prediction function
     psi_pred_func = jax.jit(jax.vmap(learned_gp.psi, in_axes=(0, None)))
+    psi_dist = jax.jit(jax.vmap(learned_gp.psi_dist))
+    # psi_mean = psi_dist.mean
+    # psi_var = psi_dist.var
+
+    # psi_var_func =  jax.jit(jax.vmap(lambda f: learned_gp.psi(f).var))
+    # psi_pred_sample = jax.jit(jax.vmap(learned_gp.psi_sample, in_axes=(0, None)))
 
     # Create 2x3 grid for all modes
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -189,8 +283,20 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path):
             psi_sample = psi_pred_func(F_mode, jr.PRNGKey(i))
             label = "GP Samples" if i == 0 else None
             ax.plot(gamma, psi_sample, color="royalblue", alpha=0.1, linewidth=0.8, label=label, zorder=1)
-        psi_mean = psi_pred_func(F_mode, None)
-        ax.plot(gamma, psi_mean, color="navy", alpha=0.9, linewidth=2, label="GP Mean", zorder=2)
+        psi_mean = psi_dist(F_mode).mean
+        psi_var = psi_dist(F_mode).var
+        psi_std = jnp.sqrt(psi_var)
+        lower_bound = psi_mean - 1.96 * psi_std
+        upper_bound = psi_mean + 1.96 * psi_std
+
+        # Plot the Mean
+
+        # psi_mean = psi_pred_func(F_mode, None)
+        ax.plot(gamma, psi_mean, color="navy", alpha=0.9, linewidth=2, label="GP Mean", zorder=3)
+
+        # Plot the 95% Confidence Interval
+        ax.fill_between(gamma, lower_bound, upper_bound, 
+                        color="navy", alpha=0.2, label="95% CI", zorder=2)
         
 
         # Formatting
@@ -198,6 +304,12 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path):
         ax.set_xlabel("Deformation Measure ($\gamma$)")
         ax.set_ylabel("Energy ($\psi$)")
         ax.grid(True, linestyle='--', alpha=0.5)
+        y_min = jnp.min(jnp.array([psi_true.min(), psi_mean.min()]))
+        y_max = jnp.max(jnp.array([psi_true.max(), psi_mean.max()]))
+
+        # Add a 10% buffer so the lines aren't touching the edge
+        padding = (y_max - y_min) * 0.1
+        ax.set_ylim(y_min - padding, y_max + padding)
         if idx == 0: # Only show legend on first plot to avoid clutter
             ax.legend()
 
@@ -208,11 +320,176 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path):
     plt.savefig(save_file)
     print(f"Loading mode validation plots saved to: {save_file}")
 
-def plot_inducing_points() :
-    # 1 figure -> 2 plots
-    # 1. 
-    # 2. plot on I1_dev and I2_dev of . plus data points
-    # 3. path of the inducings points. from first step to final step every 50 steps
-    pass
-
     
+def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
+    # Setup Figure 1: Inducing points in Feature Space
+    fig1, axes1 = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Plot 1: I1_dev vs I2_dev (Inducing points for the Deviatoric GP)
+    
+    axes1[0].scatter(dev_I[:, 0], dev_I[:, 1], marker='o', label='Invariants (Dev)')
+    axes1[0].scatter(dev_z[:, 0], dev_z[:, 1], c='red', marker='x', label='Inducing Points (Dev)')
+    axes1[0].set_xlabel(r"$\bar{I}_1$")
+    axes1[0].set_ylabel(r"$\bar{I}_2$")
+    axes1[0].set_title("Deviatoric Inducing Points")
+    axes1[0].legend()
+
+    # Plot 2: J vs -2*J (Inducing points for the Volumetric GP)
+    axes1[1].scatter(vol_I[:, 0], vol_I[:, 1], marker='o', label='J and -2 * J (Vol)')
+    axes1[1].scatter(vol_z[:, 0], vol_z[:, 1], c='red', marker='x', label='Inducing Points (Vol)')
+    # Reference constraint line
+    axes1[1].set_xlabel(r"$J$")
+    axes1[1].set_ylabel(r"$-2J$")
+    axes1[1].set_title("Volumetric Inducing Points")
+    axes1[1].legend()
+    
+    fig1.savefig(os.path.join(save_path, "inducing_points_features.png"))
+
+    # --- Setup Figure 2: Standard Load Paths ---
+    fig2, axes2 = plt.subplots(1, 3, figsize=(18, 5))
+    num_points = 100
+    gamma = jnp.linspace(0.0, 1.0, num_points)
+    modes = {
+        "Uniaxial Tension": jnp.zeros((num_points, 3, 3)),
+        "Equibiaxial Tension": jnp.zeros((num_points, 3, 3)),
+        "Pure Shear": jnp.zeros((num_points, 3, 3)),
+        "Uniaxial Compression": jnp.zeros((num_points, 3, 3)),
+        "Equibiaxial Compression": jnp.zeros((num_points, 3, 3)),
+        "Simple Shear": jnp.zeros((num_points, 3, 3))
+    }
+
+    # Populate Deformation Gradients (F)
+    modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 0, 0].set(1 + gamma)
+    modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+
+    modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 0, 0].set(1 + gamma)
+    modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 1, 1].set(1 + gamma).at[:, 2, 2].set(1)
+
+    modes["Pure Shear"] = modes["Pure Shear"].at[:, 0, 0].set(1 + gamma)
+    modes["Pure Shear"] = modes["Pure Shear"].at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+
+    modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 0, 0].set(1/(1 + gamma))
+    modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+
+    modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 0, 0].set(1/(1 + gamma))
+    modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+
+    modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 0].set(1).at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+    modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 1].set(gamma) # Standard simple shear gamma
+    # Reuse your 'modes' dictionary logic here (assuming 'modes' is accessible)
+    # For brevity, we compute and plot the lines for each mode:
+    axes2[0].scatter(dev_I[:, 0] - 3, dev_I[:, 1] - 3, marker='o')
+    axes2[1].scatter(dev_I[:, 0] - 3, (vol_I[:, 0] - 1)**2, marker='o')
+    axes2[2].scatter(dev_I[:, 1] - 3, (vol_I[:, 0] - 1)**2, marker='o')
+
+    axes2[0].scatter(dev_z[:, 0] - 3, dev_z[:, 1] - 3, color = "red", marker='x')
+    axes2[1].scatter(dev_z[:, 0] - 3, (vol_z[:, 0] - 1)**2, color = "red", marker='x')
+    axes2[2].scatter(dev_z[:, 1] - 3, (vol_z[:, 0] - 1)**2, color = "red", marker='x')
+
+    for mode_name, F_stack in modes.items():
+        i, _  = jax.vmap(invariants_and_derivatives)(F_stack)
+        js = jnp.sqrt(i[:, 2])
+        i1_bar = js**(-2/3) * i[:, 0]
+        i2_bar = js**(-4/3) * i[:, 1]
+        # Plot 1: I1_bar - 3 vs I2_bar - 3
+        axes2[0].plot(i1_bar - 3, i2_bar - 3, label=mode_name)
+
+        # Plot 2: I1_bar - 3 vs (J - 1)**2
+        axes2[1].plot(i1_bar - 3, (js - 1)**2, label=mode_name)
+        
+        # Plot 3: I2_bar - 3 vs (J - 1)**2
+        axes2[2].plot(i2_bar - 3, (js - 1)**2, label=mode_name)
+    # Labeling Figure 2
+    axes2[0].set_title(r"$\bar{I}_1-3$ vs $\bar{I}_2-3$")
+    axes2[1].set_title(r"$\bar{I}_1-3$ vs $(J-1)^2$")
+    axes2[2].set_title(r"$\bar{I}_2-3$ vs $(J-1)^2$")
+    
+    for ax in axes2:
+        ax.legend(fontsize='small')
+        ax.grid(True, alpha=0.2)
+        
+    plt.tight_layout()
+    fig2.savefig(os.path.join(save_path, "standard_loading_paths.png"))
+
+
+def plot_stress_validation(gp_model, true_model, save_path):
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle("Piola Stress Validation: Model Discovery vs. True Physics", fontsize=16)
+    axes = axes.flatten()
+    num_points = 100
+    gamma = jnp.linspace(0.0, 1.0, num_points)
+    modes = {
+        "Uniaxial Tension": jnp.zeros((num_points, 3, 3)),
+        "Equibiaxial Tension": jnp.zeros((num_points, 3, 3)),
+        "Pure Shear": jnp.zeros((num_points, 3, 3)),
+        "Uniaxial Compression": jnp.zeros((num_points, 3, 3)),
+        "Equibiaxial Compression": jnp.zeros((num_points, 3, 3)),
+        "Simple Shear": jnp.zeros((num_points, 3, 3))
+    }
+
+    # Populate Deformation Gradients (F)
+    modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 0, 0].set(1 + gamma)
+    modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+
+    modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 0, 0].set(1 + gamma)
+    modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 1, 1].set(1 + gamma).at[:, 2, 2].set(1)
+
+    modes["Pure Shear"] = modes["Pure Shear"].at[:, 0, 0].set(1 + gamma)
+    modes["Pure Shear"] = modes["Pure Shear"].at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+
+    modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 0, 0].set(1/(1 + gamma))
+    modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+
+    modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 0, 0].set(1/(1 + gamma))
+    modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+
+    modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 0].set(1).at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+    modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 1].set(gamma) # Standard simple shear gamma
+    
+    for i, (mode_name, F_stack) in enumerate(modes.items()):
+        # 1. Compute Piola Stress for the whole stack
+        # Piola_stress function uses jax.grad(psi)
+        P_predicted = jax.vmap(lambda f: gp_model.piola(f, None))(F_stack)
+        P_predicted = jnp.array(P_predicted)
+
+        P_var = jax.vmap(lambda f: gp_model.piola_dist(f).var)(F_stack)
+        P_std = jnp.sqrt(P_var)
+        P_lower_bound = P_predicted - 1.96 * P_std
+        P_upper_bound = P_predicted + 1.96 * P_std
+        
+        P_true = jax.vmap(true_model.P)(F_stack)
+        # 2. Select the relevant component based on the mode
+        if mode_name == "Pure Shear":
+            y_pred = P_predicted[:, 1, 1] # P22
+            y_true = P_true[:, 1, 1]
+            lower = P_lower_bound[:, 1, 1]
+            upper = P_upper_bound[:, 1, 1]
+            label = r"$P_{22}$"
+        elif mode_name == "Simple Shear":
+            y_pred = P_predicted[:, 0, 1] # P12
+            y_true = P_true[:, 0, 1]
+            lower = P_lower_bound[:, 0, 1]
+            upper = P_upper_bound[:, 0, 1]
+            label = r"$P_{12}$"
+        else:
+            y_pred = P_predicted[:, 0, 0] # P11
+            y_true = P_true[:, 0, 0]
+            lower = P_lower_bound[:, 0, 0]
+            upper = P_upper_bound[:, 0, 0]
+            label = r"$P_{11}$"
+
+        # 3. Plotting
+        gamma = jnp.linspace(0, 1, len(F_stack)) # Match your gamma range
+        axes[i].plot(gamma, y_pred, color='blue', label='GP Predicted')
+        axes[i].fill_between(gamma, lower, upper, color='blue', alpha=0.2, label='95% CI')
+        # Assuming you have ground truth stress 'y_true'
+        axes[i].plot(gamma, y_true, 'k--', alpha=0.6, label='True')
+        
+        axes[i].set_title(mode_name)
+        axes[i].set_ylabel(label)
+        axes[i].set_xlabel(r"$\gamma$")
+        axes[i].grid(True, alpha=0.3)
+        axes[i].legend()
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(os.path.join(save_path, "piola_stress_validation.png"))
