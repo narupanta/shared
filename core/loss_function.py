@@ -4,6 +4,85 @@ import jax.random as jr
 from .utils import deformation_gradient_element, transformation_jacobian, invariants_and_derivatives, fto3x3
 from .model import SparseHyperelasticityGP, matern52_kernel, discovery_kernel, enforce_softplus_positive, transform_input_features
 
+def total_loss(p, model, u_array, reactions, coords, cells, node_type, key) :
+    model.params = model.load_params(p)
+    model.precompute_weights()
+    piola_func = lambda f: model.piola(f, key)
+    ell_, (sum_free_loss, sum_fix_loss) = ell(p, u_array, reactions, piola_func, coords, cells, node_type, key)
+    kl_div = model.kl_divergance()
+
+    total_loss = -ell_ + kl_div
+    return total_loss, (ell_, kl_div, sum_free_loss, sum_fix_loss)
+
+
+def ell(p, u_array, reactions, piola_func, coords, cells, node_type, key) :
+    sigma_physic = jnp.exp(p["log_sigma_physic"])
+    sigma_glob = jnp.exp(p["log_sigma_glob"])
+    sum_free_loss, sum_fix_loss = total_physical_loss(u_array, reactions, piola_func, coords, cells, node_type)
+    free_dofs = u_array.shape[0] * u_array.shape[1] * u_array.shape[2]
+    n_reaction = reactions.shape[0] * reactions.shape[1]
+
+    free_log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * sum_free_loss - free_dofs/2.0 * jnp.log(2 * jnp.pi * (sigma_physic**2))
+    fix_log_likelihood = - (1.0 / (2 * (sigma_glob**2))) * sum_fix_loss - n_reaction/2.0 * jnp.log(2 * jnp.pi * (sigma_glob**2))
+    expected_log_likelihood = free_log_likelihood + fix_log_likelihood
+    return expected_log_likelihood, (sum_free_loss, sum_fix_loss)
+
+def total_physical_loss(u_array, reactions, piola_func, coords, cells, node_type) :
+
+    plpl = jax.vmap(physical_loss_per_loadstep, in_axes=(0, 0, None, None, None, None))
+    free_node_residual, reaction_loss = plpl(u_array, reactions, piola_func, coords, cells, node_type)
+    return jnp.sum(free_node_residual), jnp.sum(reaction_loss)
+
+def physical_loss_per_loadstep(u, reaction, piola_func, coords, cells, node_type) :
+    """
+    Virtual Field Method Weak form loss
+    params: Hyperparameter of Gaussian Process
+    coords: (C, 3, 2) per-element nodal coords
+    cells:  (C, 3) global node indices per element
+    u: displacement (format compatible with deformation_gradient_element)
+    reaction_forces: target reaction vector (4,) or similar used previously
+    n_nodes: total number of nodes
+    bc: (n_nodes, 2) boundary code mask (0 free, 1..4 etc)
+    node_type: (n_nodes, 1) ints: 0 free, 1/2 fixed (dirichlet), 3 right, 4 top
+    load_parameter: (2,) or (2,1) - [t3, t4]
+    """
+    u_cells = u[cells]
+    coord_cells = coords[cells]
+    n_nodes = coords.shape[0]
+    # --- INTERNAL FORCES (unchanged) ---
+    F, dNdx = deformation_gradient_element(coord_cells, u_cells)   # (C,2,2), (C,3,2,2?) matches your API
+    dA = jnp.linalg.det(transformation_jacobian(coord_cells)) / 2  # (C,)
+
+    # hyperGP = SparseHyperelasticityGP(params, Z_I)
+    f = jax.vmap(fto3x3)(F)
+
+    piola = jax.vmap(piola_func)(f)[:, :2, :2]
+    # internal element nodal forces: (C,3,2)
+    f_int_cell = jnp.einsum("cij, cnj -> cin", piola, dNdx) * dA[:, None, None]
+    f_int_cell = jnp.swapaxes(f_int_cell, 1, 2)    # (C,3,2)
+
+    # assemble into global internal force vector (n_nodes, 2)
+    f_int_nodes = jnp.zeros((n_nodes, 2)).at[cells].add(f_int_cell)
+
+    free_r0 = jnp.sum(f_int_nodes[node_type == 0] ** 2)
+    free_r1 = jnp.sum(f_int_nodes[node_type == 1, 1] ** 2)
+    free_r2 = jnp.sum(f_int_nodes[node_type == 2, 0] ** 2)
+    free_r3 = jnp.sum(f_int_nodes[node_type == 3, 1] ** 2)
+    free_r4 = jnp.sum(f_int_nodes[node_type == 4, 0] ** 2)
+    free_r_total = free_r0 + free_r1 + free_r2 + free_r3 + free_r4
+
+    fnl_left = (jnp.sum(f_int_nodes[node_type == 1, 0]) - reaction[0])**2
+    fnl_bottom = (jnp.sum(f_int_nodes[node_type == 2, 1]) - reaction[1])**2
+    fnl_right = (jnp.sum(f_int_nodes[node_type == 3, 0]) - reaction[2])**2
+    fnl_top = (jnp.sum(f_int_nodes[node_type == 4, 1]) - reaction[3])**2
+
+    reaction_loss = fnl_left + fnl_bottom + fnl_right + fnl_top
+
+    return free_r_total, reaction_loss
+
+
+
+
 
 def _neumann_cell_force(coords_el, types_el, t3, t4):
     """
@@ -69,6 +148,7 @@ def physical_loss(params, model, coords, cells, u,
 
     hyperGP = model
     hyperGP.params = hyperGP.load_params(params)
+    hyperGP.precompute_weights()
     
     f = jax.vmap(fto3x3)(F)
     piola = jax.vmap(lambda x: hyperGP.piola(x, key))(f)[:, :2, :2]
@@ -97,18 +177,25 @@ def physical_loss(params, model, coords, cells, u,
 
     # --- Residual R = int(grad v : P) dx  -  int(v·T) ds(Neumann)
     R_nodes = f_int_nodes - f_neu_nodes
-    free_node = (node_type != 1) & (node_type != 2)
-
+    free_node_in = (node_type != 1) & (node_type != 2)
+    free_node_on_dbc_left = (node_type == 1)
+    free_node_on_dbc_bottom = (node_type == 2)
     # only free DOFs contribute to the residual loss (bc == 0)
-    blm_loss = R_nodes[free_node] ** 2
+    free_node_in_loss = R_nodes[free_node_in] ** 2
+    free_node_on_dbc_left_loss = R_nodes[free_node_on_dbc_left, 1] ** 2
+    free_node_on_dbc_bottom_loss = R_nodes[free_node_on_dbc_bottom, 0] ** 2
+
     # loss at the dirichlet nodes
     fixed_nodes_loss1 = jnp.sum((jnp.sum(f_int_nodes[node_type == 1], axis = 0) + jnp.sum(f_neu_nodes[node_type == 3], axis = 0))**2)
     fixed_nodes_loss2 = jnp.sum((jnp.sum(f_int_nodes[node_type == 2], axis = 0) + jnp.sum(f_neu_nodes[node_type == 4], axis = 0))**2)
 
     # total_physic_loss = blm_loss + fixed_nodes_loss1 + fixed_nodes_loss2
-    free_loss = blm_loss
+    free_loss = jnp.concat([free_node_in_loss.flatten(), free_node_on_dbc_left_loss, free_node_on_dbc_bottom_loss]) 
     fix_loss = jnp.stack([fixed_nodes_loss1, fixed_nodes_loss2])
     return free_loss, fix_loss
+    # def total_physic_loss(params, model, coords, cells, u_list, n_nodes, node_type, load_parameters, key = None) :
+
+    #     jax.vmap(physical_loss, in_axes = (None, None, None, 0, None, None, None, 0, 0))
 
 def calculate_kl_divergence(params, model):
     """
@@ -159,12 +246,14 @@ def elbo_loss(params, model, coords, cells, u, n_nodes, node_type, load_paramete
     sigma_physic = jnp.exp(params["log_sigma_physic"])
     sigma_glob = jnp.exp(params["log_sigma_glob"])
 
+    # sigma_physic = 1e-2
+    # sigma_glob = 0.5
     free_loss, fix_loss = physical_loss(params, model, coords, cells, u,
                   n_nodes, node_type, load_parameter, key)
     sum_free_loss = jnp.sum(free_loss)
     sum_fix_loss = jnp.sum(fix_loss)
     physic_loss = sum_free_loss + sum_fix_loss
-    free_dofs = free_loss.shape[0] * free_loss.shape[1]
+    free_dofs = free_loss.shape[0]
     fix_dim = 2
     free_log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * sum_free_loss - free_dofs/2.0 * jnp.log(2 * jnp.pi * (sigma_physic**2))
     fix_log_likelihood = - (1.0 / (2 * (sigma_glob**2))) * sum_fix_loss - fix_dim/2.0 * jnp.log(2 * jnp.pi * (sigma_glob**2))
