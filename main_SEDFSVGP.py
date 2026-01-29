@@ -1,10 +1,8 @@
 import jax 
-import gpjax as gpx
 import jax.numpy as jnp
 from jax import config
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import install_import_hook
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import optax
@@ -194,7 +192,7 @@ if __name__ == "__main__" :
         "sigma_physic": [], "c20": [], "c02": [], "c11": [], "c10": [], "c01": [], "k": [], "q": []
     }
 
-    for step in range(100000):
+    for step in range(20000):
         main_key, subkey = jr.split(main_key)
         
         (loss, (log_like_loss, kl_loss, phy_loss, phys_loss2)), grads = loss_and_grad(params, subkey)

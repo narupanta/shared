@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import gpjax as gpx
+# import gpjax as gpx
 # -------------------------------
 # Tensor utility functions
 # -------------------------------

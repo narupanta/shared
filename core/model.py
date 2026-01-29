@@ -1,6 +1,6 @@
 # gpjax_version.py
 import os
-from flax.serialization import to_state_dict, from_state_dict
+# from flax.serialization import to_state_dict, from_state_dict
 from core.utils import *
 from core.datasetclass import *
 import jax.numpy as jnp
