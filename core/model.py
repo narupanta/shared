@@ -178,16 +178,16 @@ class GPPrecomputed(NamedTuple):
 
 class SparseHyperelasticityGP :
     '''get g latent energy which will be joint gaussian with latent energy at testpoint'''
-    def __init__(self, params, I_obs, n_ip) :
+    def __init__(self, params, I_z) :
     
-        #  = I_obs[farthest_point_sampling(I_obs, n_ip)]
-        # dev_z = I_obs_dev[farthest_point_sampling(I_obs_dev, n_ip)]
-        # vol_z = j[farthest_point_sampling(j, n_ip)]
-        dev_obs, vol_obs = jax.vmap(transform_input_features)(I_obs)
+        # #  = I_obs[farthest_point_sampling(I_obs, n_ip)]
+        # # dev_z = I_obs_dev[farthest_point_sampling(I_obs_dev, n_ip)]
+        # # vol_z = j[farthest_point_sampling(j, n_ip)]
+        # dev_obs, vol_obs = jax.vmap(transform_input_features)(I_obs)
 
         self.inducing_points = dict(
-            dev_z=dev_obs[farthest_point_sampling(dev_obs, n_ip)],
-            vol_z=vol_obs[farthest_point_sampling(vol_obs, n_ip)]
+            dev_z=I_z[:, :2],
+            vol_z=I_z[:, 2:]
         )
         # self.inducing_points["aug_dev_z"] = jnp.concat([jnp.array([[3.0, 3.0]]), self.inducing_points["dev_z"]])
         # self.inducing_points["aug_vol_z"] = jnp.concat([jnp.array([[1.0]]), self.inducing_points["vol_z"]])
@@ -327,7 +327,25 @@ class SparseHyperelasticityGP :
     #     psi_gp_covariance = covariance_fn(dev_1, dev_2, dev_z, dev_Kzz_inv, dev_S_uu, dev_sig, dev_ls) + covariance_fn(vol_1, vol_2, vol_z, vol_S_uu, vol_Kzz_inv, vol_sig, vol_ls)
     #     return psi_gp_covariance
     
-
+    def piola_quadrature(self, f_tensor, x_node):
+        """
+        Computes a deterministic stress point for Gauss-Hermite quadrature.
+        """
+        # 1. Get the predictive distribution (Mean: 3x3, Var: 3x3 diagonal)
+        # This must include the subtraction of the reference state
+        dist = self.piola_dist(f_tensor) 
+        
+        # 2. Extract mean and standard deviation
+        # We use jnp.maximum to ensure numerical stability (no negative variance)
+        p_mean = dist.mean
+        p_std = jnp.sqrt(jnp.maximum(dist.var, 1e-9))
+        
+        # 3. Transform the GH node into stress space
+        # Formula: P_j = mu + sqrt(2) * sigma * x_j
+        # This maps the standard normal node to your specific GP uncertainty
+        p_quad = p_mean + jnp.sqrt(2.0) * p_std * x_node
+        
+        return p_quad
     def kl_divergance(self) :
         params = self.params
 
@@ -337,8 +355,11 @@ class SparseHyperelasticityGP :
             Kzz_inv = self.precomputed_weights[f"{part}_Kzz_inv"]
 
             trace_term = jnp.trace(Kzz_inv @ jnp.diag(u_var))
+            # update prior
             mahalanobis_term = (u_mean - trend) @ Kzz_inv @ (u_mean - trend).T
-            
+            # not update prior
+            # mahalanobis_term = (u_mean) @ Kzz_inv @ (u_mean).T
+
             log_det_K = jnp.log(jnp.linalg.det(Kzz))
             log_det_S = jnp.log(jnp.linalg.det(jnp.diag(u_var)))
             
@@ -375,9 +396,16 @@ class SparseHyperelasticityGP :
         
         # 4. MEAN CALCULATION (Prior Mean + GP Correction)
         # mu = trend(x*) + Kiz @ Kzz_inv @ (u_mean - trend(z))
+        # with prior update
         residual_at_z = m_u - mu_trend_z
         gp_correction = Kiz @ Kzz_inv @ residual_at_z
         mean = mu_trend_star + gp_correction
+        # not update prior #
+        # gp_mean = Kiz @ Kzz_inv @ (m_u)
+        # mu_trend_z = jax.vmap(self._trend_fn, in_axes=(0, None))(z, part) 
+        
+        # mu_trend_star = self._trend_fn(features, part) 
+        # mean = mu_trend_star + gp_mean
         
         # 5. VARIANCE CALCULATION
         # v_standard = Kii - Kiz @ Kzz_inv @ Kiz.T (Epistemic uncertainty of GP)
@@ -392,13 +420,24 @@ class SparseHyperelasticityGP :
 
     def piola(self, F, key) :
         return jax.grad(lambda f : self.psi(f, key))(F)
+        # dist = self.psi(F)
+        # if key is None :
+        #     return dist.mean
+        # else :
+        #     return dist.mean + jax.random.normal(key, dist.mean.shape) * jnp.sqrt(dist.var)
         
     def piola_dist(self, deformation_gradient) :
         piola_gp_dist = self._piola_gp_dist(deformation_gradient)
         piola_ref_dist = self._piola_gp_dist(jnp.eye(deformation_gradient.shape[-1])) 
-        
-        return StressDist(piola_gp_dist.mean - deformation_gradient @ piola_ref_dist.mean, piola_gp_dist.var + deformation_gradient @ piola_ref_dist.var)
-    
+        # var4th = self._get_piola_gp_cov(deformation_gradient, jnp.eye(deformation_gradient.shape[-1]))
+        # var2nd = jnp.einsum('ijij->ij', var4th)
+        var = piola_gp_dist.var + deformation_gradient @ piola_ref_dist.var @ deformation_gradient.T
+        return StressDist(piola_gp_dist.mean - deformation_gradient @ piola_ref_dist.mean, var)
+    def _get_piola_gp_cov(self, f1, f2) :
+        stress_cov_tensor = jax.jacfwd(jax.jacrev(self._get_psi_gp_cov, argnums=1), argnums=0)(
+                f1, f2
+            )
+        return stress_cov_tensor
     def _piola_gp_dist(self, deformation_gradient) :
         piola_gp_mean = jax.grad(lambda f : self._internal_energy_dist(f).mean)(deformation_gradient)
         stress_cov_tensor = jax.jacfwd(jax.jacrev(self._get_psi_gp_cov, argnums=1), argnums=0)(
@@ -418,26 +457,28 @@ class SparseHyperelasticityGP :
         mu_f = self._internal_energy_dist(F).mean
         mu_ref = self._internal_energy_dist(ref_f).mean
         p_ref = self._piola_gp_dist(ref_f).mean
-        
+        norm_mean = mu_f
+        base_var = self._internal_energy_dist(F).var
+        # total_var = base_var
         norm_mean = mu_f - mu_ref - jnp.sum(p_ref * E)
 
-        # 2. Correct Variance using the full Covariance Formula
-        # Var(Psi_norm) = Var(F) + Var(Ref) - 2*Cov(F, Ref) + Var(Stress_Correction)
-        # Plus cross-terms if you want to be perfectly rigorous.
+        # # 2. Correct Variance using the full Covariance Formula
+        # # Var(Psi_norm) = Var(F) + Var(Ref) - 2*Cov(F, Ref) + Var(Stress_Correction)
+        # # Plus cross-terms if you want to be perfectly rigorous.
         
         var_f = self._get_psi_gp_cov(F, F)
         var_ref = self._get_psi_gp_cov(ref_f, ref_f)
         cov_f_ref = self._get_psi_gp_cov(F, ref_f)
         
-        # Standard GP variance for (Psi(F) - Psi(I))
+        # # Standard GP variance for (Psi(F) - Psi(I))
         base_var = var_f + var_ref - 2 * cov_f_ref
         
-        # Add stress correction variance (Simplified approximation)
-        # In a rigorous setup, you'd also need Cov(Psi, Grad_Psi)
+        # # Add stress correction variance (Simplified approximation)
+        # # In a rigorous setup, you'd also need Cov(Psi, Grad_Psi)
         piola_ref_var = self._piola_gp_dist(ref_f).var
-        psi_stress_ref_var = jnp.sum(piola_ref_var * E) # Corrected E scaling
-
-        return EnergyDist(norm_mean, jax.nn.relu(base_var + psi_stress_ref_var))
+        psi_stress_ref_var = jnp.sum(piola_ref_var * (E @ E)) # Corrected E scaling
+        total_var = base_var + psi_stress_ref_var
+        return EnergyDist(norm_mean, total_var)
     
     def psi(self, F, key = None):
         dist = self.psi_dist(F)
@@ -475,11 +516,15 @@ class SparseHyperelasticityGP :
 
     def _dev_mean(self, dev_f):
         p = self.params
+        # dev_t = 1 * (dev_f[0] - 3)**2 + 0.5 * (dev_f[0] - 3) + 1 * (dev_f[1] - 3)
+
         dev_t = p["c20"] * (dev_f[0] - 3)**2 + p["c02"]*(dev_f[1]-3)**2 + p["c11"]*(dev_f[0] - 3)*(dev_f[1] - 3) + p["c10"] * (dev_f[0] - 3) + p["c01"] * (dev_f[1] - 3)
         return dev_t
 
     def _vol_mean(self, vol_f):
         p = self.params
+        # vol_t = 1.5*(vol_f[0] - 1)**2
+
         vol_t = p["k"]*(vol_f[0] - 1)**2 + p["q"] *jnp.log(vol_f[0])**2
         return vol_t 
 
@@ -523,9 +568,11 @@ class SparseHyperelasticityGP :
         return cov_dev + cov_vol
 
     def load_params(self, params) :
+        check1 = jnp.std(self.inducing_points["dev_z"], axis = 0)
+        check2 = jnp.std(self.inducing_points["vol_z"], axis = 0)
         params = {
-            "dev_gp_lengthscales" : jnp.exp(params["raw_dev_gp_lengthscales"]), 
-            "vol_gp_lengthscales" : jnp.exp(params["raw_vol_gp_lengthscales"]), 
+            "dev_gp_lengthscales" : jnp.std(self.inducing_points["dev_z"], axis = 0) + enforce_softplus_positive(params["raw_dev_gp_lengthscales"]), 
+            "vol_gp_lengthscales" : jnp.std(self.inducing_points["vol_z"], axis = 0) + enforce_softplus_positive(params["raw_vol_gp_lengthscales"]), 
             "dev_gp_sigma_scaling" : jnp.exp(params["raw_dev_gp_sigma_scaling"]),
             "vol_gp_sigma_scaling" : jnp.exp(params["raw_vol_gp_sigma_scaling"]),
             "dev_u_mean" : enforce_softplus_positive(params["raw_dev_u_mean"]),
@@ -540,7 +587,26 @@ class SparseHyperelasticityGP :
             "k": enforce_softplus_positive(params["raw_k"]),
             "q": enforce_softplus_positive(params["raw_q"]),
         }
+        # not update prior
+        # params = {
+        #     "dev_gp_lengthscales" : jnp.std(self.inducing_points["dev_z"], axis = 0) + enforce_softplus_positive(params["raw_dev_gp_lengthscales"]), 
+        #     "vol_gp_lengthscales" : jnp.std(self.inducing_points["vol_z"], axis = 0) + enforce_softplus_positive(params["raw_vol_gp_lengthscales"]), 
+        #     "dev_gp_sigma_scaling" : jnp.exp(params["raw_dev_gp_sigma_scaling"]),
+        #     "vol_gp_sigma_scaling" : jnp.exp(params["raw_vol_gp_sigma_scaling"]),
+        #     "dev_u_mean" : params["raw_dev_u_mean"],
+        #     "dev_u_var" : enforce_softplus_positive(params["raw_dev_u_var"]),
+        #     "vol_u_mean" : params["raw_vol_u_mean"],
+        #     "vol_u_var" : enforce_softplus_positive(params["raw_vol_u_var"]),
+        #     "c20": enforce_softplus_positive(params["raw_c20"]),
+        #     "c02": enforce_softplus_positive(params["raw_c02"]),
+        #     "c11": enforce_softplus_positive(params["raw_c11"]),
+        #     "c10": enforce_softplus_positive(params["raw_c10"]),
+        #     "c01": enforce_softplus_positive(params["raw_c01"]),
+        #     "k": enforce_softplus_positive(params["raw_k"]),
+        #     "q": enforce_softplus_positive(params["raw_q"]),
+        # }
         return params
+
 
 
 
