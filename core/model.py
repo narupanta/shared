@@ -207,145 +207,30 @@ class SparseHyperelasticityGP :
             self.params[f"{alpha}_Kzz"] = Kzz
             self.precomputed_weights[f"{alpha}_Kzz"] = Kzz
             self.precomputed_weights[f"{alpha}_Kzz_inv"] = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0]))
-    # def piola(self, F, key) :
-    #     if key is None :
-    #         return self.piola_dist(F).mean
-    #     else :
-    #         return jax.grad(lambda f: self.psi(f, key))(F)
-    # def psi(self, f, key) :
-    #     ref_f = jnp.eye(f.shape[-1])
-    #     E = 0.5 * (f.T @ f - ref_f)
-    #     def psi_sam(f, key) :
-    #         psi_gp_dist = self.psi_gp_dist(f)
-    #         if key is None :
-    #             return psi_gp_dist.mean
-    #         else : 
-    #             return psi_gp_dist.mean + jnp.sqrt(psi_gp_dist.var) * jax.random.normal(key, psi_gp_dist.mean.shape)
-    #     H = jax.grad(lambda f: psi_sam(f, key))(ref_f)
-    #     return psi_sam(f, key) - psi_sam(ref_f, key) - jnp.sum(H * E)
-
-    # def piola_dist(self, f) :
-    #     ref_f = jnp.eye(f.shape[-1])
-    #     piola_gp_dist = self.piola_gp_dist(f)
-    #     piola_ref_dist = self.piola_gp_dist(ref_f)
-    
-    #     piola_mean = piola_gp_dist.mean - f @ piola_ref_dist.mean
-    #     piola_var = piola_gp_dist.var + f @ piola_ref_dist.var
-    #     return StressDist(piola_mean, piola_var)
-    
-    # def psi_dist(self, f) :
-    #     ref_f = jnp.eye(f.shape[-1])
-    #     E = 0.5 * (f.T @ f - ref_f)
-    #     psi_gp_dist = self.psi_gp_dist(f)
-    #     psi_ref_dist = self.psi_gp_dist(ref_f)
-        
-    #     piola_gp_ref_dist = self.piola_gp_dist(ref_f)
-
-    #     norm_mean = psi_gp_dist.mean - psi_ref_dist.mean - jnp.sum(piola_gp_ref_dist.mean * E)
-    #     norm_var = psi_gp_dist.var + psi_ref_dist.var + jnp.sum(piola_gp_ref_dist.var * E)
-    #     return EnergyDist(norm_mean, norm_var)
-    
-    # def piola_gp_dist(self, f) :
-    #     piola_gp_mean = jax.grad(self._predict_psi_gp_mean)(f)
-
-    #     def get_diagonal_stress_var(f):
-    #         # Flatten f to (9,) to work with a (9,9) Hessian more easily
-    #         f_flat = f.reshape(-1)
             
-    #         def scalar_cov_flat(flat_f1, flat_f2):
-    #             return self._predict_psi_gp_covariance(flat_f1.reshape(3,3), flat_f2.reshape(3,3))
-
-    #         # Calculate the full 9x9 Hessian and immediately take the diagonal
-    #         # This results in a (9,) vector of variances for [P11, P12, P13, P21...]
-    #         hessian_9x9 = jax.hessian(scalar_cov_flat, argnums=0)(f_flat, f_flat)
-    #         diag_vars = jnp.diag(hessian_9x9)
-            
-    #         return diag_vars.reshape(3, 3)
-
-
-    #     piola_gp_var = get_diagonal_stress_var(f)
-    #     return StressDist(piola_gp_mean, piola_gp_var)
-    
-    # def psi_gp_dist(self, f):
-
-    #     mean = self._predict_psi_gp_mean(f)
-    #     variance = self._predict_psi_gp_covariance(f, f)
-        
-    #     return EnergyDist(mean = mean, var = variance)
-            
-    
-    # def _predict_psi_gp_mean(self, f) :
-    #     i, _ = invariants_and_derivatives(f)
-    #     dev, vol = transform_input_features(i)
-
-    #     dev_z = self.inducing_points[f"dev_z"]
-    #     dev_ls = self.params[f"dev_gp_lengthscales"]
-    #     dev_sig = self.params[f"dev_gp_sigma_scaling"]
-    #     dev_m_u = self.params[f"dev_u_mean"]
-        
-    #     vol_z = self.inducing_points[f"vol_z"]
-    #     vol_ls = self.params[f"vol_gp_lengthscales"]
-    #     vol_sig = self.params[f"vol_gp_sigma_scaling"]
-    #     vol_m_u = self.params[f"vol_u_mean"]
-
-    #     def mean_fn(features, z, Kzz_inv, m_u, sigma, ls, part) :
-    #         mu_trend_z = jax.vmap(self._trend_fn, in_axes=(0, None))(z, part) 
-    #         Kiz = discovery_kernel(features, z, sigma, ls)
-    #         return self._trend_fn(features, part) + Kiz @ Kzz_inv @ (m_u - mu_trend_z)
-    #     return (mean_fn(dev, dev_z, self.precomputed_weights[f"dev_Kzz_inv"], dev_m_u, dev_sig, dev_ls, "dev") + mean_fn(vol, vol_z, self.precomputed_weights[f"vol_Kzz_inv"], vol_m_u, vol_sig, vol_ls, "vol")).squeeze()
-
-
-    # def _predict_psi_gp_covariance(self, f1, f2) :
-    #     i1, _ = invariants_and_derivatives(f1)
-    #     i2, _ = invariants_and_derivatives(f2)
-    #     dev_1, vol_1 = transform_input_features(i1)
-    #     dev_2, vol_2 = transform_input_features(i2)
-
-    #     # 2. Extract Params
-    #     dev_z = self.inducing_points[f"dev_z"]
-    #     dev_ls = self.params[f"dev_gp_lengthscales"]
-    #     dev_sig = self.params[f"dev_gp_sigma_scaling"]
-    #     dev_S_uu = jnp.diag(self.params[f"dev_u_var"])
-    #     dev_Kzz_inv = self.precomputed_weights[f"dev_Kzz_inv"]
-
-    #     vol_z = self.inducing_points[f"vol_z"]
-    #     vol_ls = self.params[f"vol_gp_lengthscales"]
-    #     vol_sig = self.params[f"vol_gp_sigma_scaling"]
-    #     vol_S_uu = jnp.diag(self.params[f"vol_u_var"])
-    #     vol_Kzz_inv = self.precomputed_weights[f"vol_Kzz_inv"]
-
-
-
-    #     def covariance_fn(feat1, feat2, z, Kzz_inv, S_uu, sigma, ls) :
-    #         # 3. Compute Kernel Blocks
-    #         k12 = discovery_kernel(feat1, feat2, sigma, ls)  # Prior k(x, x')
-    #         k1z = discovery_kernel(feat1, z, sigma, ls)      # k(x, z)
-    #         kz2 = discovery_kernel(z, feat2, sigma, ls)      # k(z, x')
-    #         v_standard = k12 - k1z @ Kzz_inv @ kz2
-    #         v_learned = k1z @ Kzz_inv @ S_uu @ Kzz_inv @ kz2
-    #         return jnp.maximum(v_standard + v_learned, 1e-9).squeeze()
-    #     psi_gp_covariance = covariance_fn(dev_1, dev_2, dev_z, dev_Kzz_inv, dev_S_uu, dev_sig, dev_ls) + covariance_fn(vol_1, vol_2, vol_z, vol_S_uu, vol_Kzz_inv, vol_sig, vol_ls)
-    #     return psi_gp_covariance
-    
-    def piola_quadrature(self, f_tensor, x_node):
+    def psi_quadrature(self, f_tensor, x_node):
         """
         Computes a deterministic stress point for Gauss-Hermite quadrature.
         """
         # 1. Get the predictive distribution (Mean: 3x3, Var: 3x3 diagonal)
         # This must include the subtraction of the reference state
-        dist = self.piola_dist(f_tensor) 
+        dist = self.psi_dist(f_tensor) 
         
         # 2. Extract mean and standard deviation
         # We use jnp.maximum to ensure numerical stability (no negative variance)
-        p_mean = dist.mean
-        p_std = jnp.sqrt(jnp.maximum(dist.var, 1e-9))
+        psi_mean = dist.mean
+        psi_std = jnp.sqrt(jnp.maximum(dist.var, 1e-9))
         
         # 3. Transform the GH node into stress space
         # Formula: P_j = mu + sqrt(2) * sigma * x_j
         # This maps the standard normal node to your specific GP uncertainty
-        p_quad = p_mean + jnp.sqrt(2.0) * p_std * x_node
+        p_quad = psi_mean + jnp.sqrt(2.0) * psi_std * x_node
         
         return p_quad
+    def piola_quadrature(self, deformation_gradient, x_node):
+        piola_q = jax.grad(lambda f : self.psi_quadrature(f, x_node))(deformation_gradient)
+        return piola_q
+    
     def kl_divergance(self) :
         params = self.params
 
@@ -390,9 +275,6 @@ class SparseHyperelasticityGP :
         mu_trend_star = self._trend_fn(features, part) 
         # Trend at the inducing points (Z)
         mu_trend_z = jax.vmap(self._trend_fn, in_axes=(0, None))(z, part) 
-        
-        # 3. Solve for Kzz_inv
-        # Kzz_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0]))
         
         # 4. MEAN CALCULATION (Prior Mean + GP Correction)
         # mu = trend(x*) + Kiz @ Kzz_inv @ (u_mean - trend(z))
@@ -478,6 +360,7 @@ class SparseHyperelasticityGP :
         piola_ref_var = self._piola_gp_dist(ref_f).var
         psi_stress_ref_var = jnp.sum(piola_ref_var * (E @ E)) # Corrected E scaling
         total_var = base_var + psi_stress_ref_var
+        total_var = jnp.maximum(total_var, 1e-9)
         return EnergyDist(norm_mean, total_var)
     
     def psi(self, F, key = None):

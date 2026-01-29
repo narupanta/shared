@@ -6,46 +6,42 @@ from .model import SparseHyperelasticityGP, matern52_kernel, discovery_kernel, e
 
 # def piola_quadrature() :
 #     return
-# def total_loss(p, model, u_array, reactions, coords, cells, node_type, key) :
-#     model.params = model.load_params(p)
-#     model.precompute_weights()
-#     # piola_func = lambda f: model.piola(f, key)
-#     sigma_physic = jnp.exp(p["log_sigma_physic"])
-#     sigma_glob = jnp.exp(p["log_sigma_glob"])
-#     GH_X = jnp.array([-2.0201, -0.9585, 0.0, 0.9585, 2.0201])
-#     GH_W = jnp.array([0.0112, 0.2220, 0.5333, 0.2220, 0.0112])
-
-#     def quadrature_step(x_node, weight):
-#         # Deterministic Piola at a specific uncertainty point
-#         piola_func = lambda f: model.piola_quadrature(f, x_node) 
-        
-#         # Use SCAN instead of VMAP for the 50,000 steps to save RAM
-#         def body_fn(carry, inputs):
-#             u, react = inputs
-#             free_res, react_res = physical_loss_per_loadstep_force_controlled(
-#                 u, react, piola_func, coords, cells, node_type
-#             )
-#             return None, (free_res, react_res)
-        
-#         _, (res_free, res_fix) = jax.lax.scan(body_fn, None, (u_array, reactions))
-#         return weight * jnp.sum(res_free), weight * jnp.sum(res_fix)
-
-#     # Sum the weighted losses across the 5 nodes
-#     sum_free, sum_fix = jax.vmap(quadrature_step)(GH_X, GH_W)
-#     ell_, (sum_free_loss, sum_fix_loss) = ell(sigma_physic, sigma_glob, u_array, reactions, piola_func, coords, cells, node_type, key)
-#     kl_div = model.kl_divergance()
-#     total_loss = -ell_ + kl_div
-#     return total_loss, (ell_, kl_div, sum_free_loss, sum_fix_loss)
 def total_loss(p, model, u_array, loads, reactions, coords, cells, node_type, key) :
     model.params = model.load_params(p)
     model.precompute_weights()
-    piola_func = lambda f: model.piola(f, key)
+    # piola_func = lambda f: model.piola(f, key)
     sigma_physic = jnp.exp(p["log_sigma_physic"])
     sigma_glob = jnp.exp(p["log_sigma_glob"])
-    ell_, (sum_free_loss, sum_fix_loss) = ell(sigma_physic, sigma_glob, u_array, loads, reactions, piola_func, coords, cells, node_type, key)
+    GH_X = jnp.array([-2.0201, -0.9585, 0.0, 0.9585, 2.0201])
+    GH_W = jnp.array([0.0112, 0.2220, 0.5333, 0.2220, 0.0112])
+
+    def quadrature_fn(x_node, weight, sigma_physic, sigma_glob, u, load, react, coords, cells, node_type):
+        # Deterministic Piola at a specific uncertainty point
+        piola_func = lambda f: model.piola_quadrature(f, x_node) 
+        
+        # Use SCAN instead of VMAP for the 50,000 steps to save RAM
+        ell_, _ = ell(sigma_physic, sigma_glob, u, load, react, piola_func, coords, cells, node_type, None)
+
+        return weight * jnp.sum(ell_)
+
+    # Sum the weighted losses across the 5 nodes
+    sum_ell = jnp.sum(jax.vmap(quadrature_fn, in_axes=(0, 0, None, None, None, None, None, None, None, None))(GH_X, GH_W, sigma_physic, sigma_glob, u_array, loads, reactions, coords, cells, node_type))
+    # ell_, (sum_free_loss, sum_fix_loss) = ell(sigma_physic, sigma_glob, u_array, reactions, piola_func, coords, cells, node_type, key)
+    sum_free_loss = 0.0
+    sum_fix_loss = 0.0
     kl_div = model.kl_divergance()
-    total_loss = -ell_ + kl_div
-    return total_loss, (ell_, kl_div, sum_free_loss, sum_fix_loss)
+    total_loss = -sum_ell + kl_div
+    return total_loss, (sum_ell, kl_div, sum_free_loss, sum_fix_loss)
+# def total_loss(p, model, u_array, loads, reactions, coords, cells, node_type, key) :
+#     model.params = model.load_params(p)
+#     model.precompute_weights()
+#     piola_func = lambda f: model.piola(f, key)
+#     sigma_physic = jnp.exp(p["log_sigma_physic"])
+#     sigma_glob = jnp.exp(p["log_sigma_glob"])
+#     ell_, (sum_free_loss, sum_fix_loss) = ell(sigma_physic, sigma_glob, u_array, loads, reactions, piola_func, coords, cells, node_type, key)
+#     kl_div = model.kl_divergance()
+#     total_loss = -ell_ + kl_div
+#     return total_loss, (ell_, kl_div, sum_free_loss, sum_fix_loss)
 
 
 def ell(sigma_physic, sigma_glob, u_array, loads, reactions, piola_func, coords, cells, node_type, key) :

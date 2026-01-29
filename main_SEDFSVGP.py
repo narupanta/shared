@@ -74,8 +74,8 @@ if __name__ == "__main__" :
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     save_path = os.path.join(base_save_path, timestamp)
     os.makedirs(save_path, exist_ok=True)
-    material_model = "neohookean"
-    dataset_name = "neohookean"
+    material_model = "Isihara"
+    dataset_name = "Isihara"
     dataset = TractionDataset("dataset", dataset_name)
     F_all = []
     reactions = []
@@ -88,7 +88,7 @@ if __name__ == "__main__" :
         coords = data["mesh_pos"][:,:2]
         cells = data["cells"]
         # u = data["u"]
-        percent_noise = 0.00005
+        percent_noise = 0.0000
         node_type = data["node_type"]
         ux = data["u"][:, 0]
         ux[(data["node_type"] != 1)] += np.random.normal(0, percent_noise * 1, ux.shape)[(data["node_type"] != 1)]
@@ -152,13 +152,18 @@ if __name__ == "__main__" :
 
     main_key = jr.PRNGKey(42)
     model = SparseHyperelasticityGP(params, I_z)
-    # model_path = "/home/mmdiscovery/shared/saved_model/20260127T145504/" # Replace with the actual path to your saved model
+    # model_path = "/home/mmdiscovery/shared/saved_model/20260129T135256/" # Replace with the actual path to your saved model
     # with open(os.path.join(model_path, "best_params.npy"), "rb") as f:
     #     load_params = jnp.load(f, allow_pickle=True).item()
     # model.params = model.load_params(load_params)
     # params = load_params
     # loss_and_grad = jax.jit(jax.value_and_grad(
     #     lambda p, k: elbo_loss(p, model, coord_cells, cells, u_cells, coords.shape[0], node_type, load_parameter, k),
+    #     has_aux=True
+    # ))
+
+    # loss_and_grad = jax.jit(jax.value_and_grad(
+    #     lambda p, k: total_loss(p, model, u_array, loads, reactions_array, coords, cells, node_type, k),
     #     has_aux=True
     # ))
 
@@ -198,7 +203,7 @@ if __name__ == "__main__" :
         "sigma_physic": [], "c20": [], "c02": [], "c11": [], "c10": [], "c01": [], "k": [], "q": []
     }
 
-    for step in range(50000):
+    for step in range(20000):
         main_key, subkey = jr.split(main_key)
         
         (loss, (log_like_loss, kl_loss, phy_loss, phys_loss2)), grads = loss_and_grad(params, subkey)
@@ -250,14 +255,14 @@ if __name__ == "__main__" :
             params_hist["vol_gp_lengthscales"].append(jnp.exp(params["raw_vol_gp_lengthscales"]))
             params_hist["dev_z"].append(params["raw_dev_z"])
             params_hist["vol_z"].append(params["raw_vol_z"])
-            params_hist["dev_u_mean"].append(params["raw_dev_u_mean"])
-            params_hist["dev_u_var"].append(enforce_softplus_positive(params["raw_dev_u_var"]))
-            params_hist["vol_u_mean"].append(params["raw_vol_u_mean"])
-            params_hist["vol_u_var"].append(enforce_softplus_positive(params["raw_vol_u_var"]))
-            # params_hist["dev_u_mean"].append(enforce_softplus_positive(params["raw_dev_u_mean"]))
+            # params_hist["dev_u_mean"].append(params["raw_dev_u_mean"])
             # params_hist["dev_u_var"].append(enforce_softplus_positive(params["raw_dev_u_var"]))
-            # params_hist["vol_u_mean"].append(enforce_softplus_positive(params["raw_vol_u_mean"]))
+            # params_hist["vol_u_mean"].append(params["raw_vol_u_mean"])
             # params_hist["vol_u_var"].append(enforce_softplus_positive(params["raw_vol_u_var"]))
+            params_hist["dev_u_mean"].append(enforce_softplus_positive(params["raw_dev_u_mean"]))
+            params_hist["dev_u_var"].append(enforce_softplus_positive(params["raw_dev_u_var"]))
+            params_hist["vol_u_mean"].append(enforce_softplus_positive(params["raw_vol_u_mean"]))
+            params_hist["vol_u_var"].append(enforce_softplus_positive(params["raw_vol_u_var"]))
             params_hist["sigma_physic"].append(np.exp(float(params["log_sigma_physic"])))
             params_hist["c20"].append(enforce_softplus_positive(float(params["raw_c20"])))
             params_hist["c02"].append(enforce_softplus_positive(float(params["raw_c02"])))
