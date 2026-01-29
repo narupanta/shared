@@ -446,32 +446,34 @@ def plot_stress_validation(gp_model, true_model, save_path):
     modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 1].set(gamma) # Standard simple shear gamma
     
     for i, (mode_name, F_stack) in enumerate(modes.items()):
+        # num_samples = 10
+        # keys = jax.random.split(jax.random.PRNGKey(42), num_samples)
         # 1. Compute Piola Stress for the whole stack
         # Piola_stress function uses jax.grad(psi)
-        P_predicted = jax.vmap(lambda f: gp_model.piola(f, None))(F_stack)
-        P_predicted = jnp.array(P_predicted)
-
+        # P_predicted = jax.vmap(lambda f: gp_model.piola(f, None))(F_stack)
+        # P_predicted = jnp.array(P_predicted)
+        P_mean = jax.vmap(lambda f: gp_model.piola_dist(f).mean)(F_stack)
         P_var = jax.vmap(lambda f: gp_model.piola_dist(f).var)(F_stack)
         P_std = jnp.sqrt(P_var)
-        P_lower_bound = P_predicted - 1.96 * P_std
-        P_upper_bound = P_predicted + 1.96 * P_std
+        P_lower_bound = P_mean - 1.96 * P_std
+        P_upper_bound = P_mean + 1.96 * P_std
         
         P_true = jax.vmap(true_model.P)(F_stack)
         # 2. Select the relevant component based on the mode
         if mode_name == "Pure Shear":
-            y_pred = P_predicted[:, 1, 1] # P22
+            y_pred = P_mean[:, 1, 1] # P22
             y_true = P_true[:, 1, 1]
             lower = P_lower_bound[:, 1, 1]
             upper = P_upper_bound[:, 1, 1]
             label = r"$P_{22}$"
         elif mode_name == "Simple Shear":
-            y_pred = P_predicted[:, 0, 1] # P12
+            y_pred = P_mean[:, 0, 1] # P12
             y_true = P_true[:, 0, 1]
             lower = P_lower_bound[:, 0, 1]
             upper = P_upper_bound[:, 0, 1]
             label = r"$P_{12}$"
         else:
-            y_pred = P_predicted[:, 0, 0] # P11
+            y_pred = P_mean[:, 0, 0] # P11
             y_true = P_true[:, 0, 0]
             lower = P_lower_bound[:, 0, 0]
             upper = P_upper_bound[:, 0, 0]
