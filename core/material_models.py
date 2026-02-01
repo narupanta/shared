@@ -236,7 +236,7 @@ class GentThomas(BaseMaterialModel):
         term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2 + term3
 
-@register_material("mooneyrivlin")
+@register_material("gentthomas")
 class GentThomas(BaseMaterialModel):
     def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
@@ -250,7 +250,7 @@ class GentThomas(BaseMaterialModel):
         I3 = I3_func(C) 
         I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
         term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
-        term2 = 2.00 * (I3_safe**(-2/3) * I2 - 3)
+        term2 = jnp.log(I3_safe**(-2/3) * I2 / 3)
         term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2 + term3
 
