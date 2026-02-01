@@ -1,10 +1,8 @@
 import jax 
-import gpjax as gpx
 import jax.numpy as jnp
 from jax import config
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import install_import_hook
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import optax
