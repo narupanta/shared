@@ -1,34 +1,11 @@
 import jax 
-import gpjax as gpx
-import jax.numpy as jnp
-from jax import config
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import install_import_hook
-import matplotlib as mpl
 import matplotlib.pyplot as plt
-import optax
-from core.model import SparseHyperelasticityGP
-from core.material_models import get_material
-import jax
-import jax.numpy as jnp
 from core.utils import *
-import datetime
-import os
-import matplotlib.pyplot as plt
-import jax.numpy as jnp
 import jax.random as jr
-import jax
-import os
-from core.datasetclass import TractionDataset
-from core.utils import invariants_and_derivatives
-from core.loss_function import physical_loss, elbo_loss
 # helper: per-element edge-based neumann traction contribution
 import os
-import re
-import ast
-import numpy as np
-import matplotlib.pyplot as plt
 def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_path) :
     fig1, axs = plt.subplots(1, 4, figsize=(22, 5))
     fig1.suptitle("Optimization Objectives and Physics Noise", fontsize=16)
@@ -58,10 +35,6 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
 
     plt.tight_layout()
     fig1.savefig(os.path.join(save_path, "loss_and_physics.png"))
-
-import matplotlib.pyplot as plt
-import numpy as np
-import os
 
 def plot_parameters_hist(params_hist, steps_history, save_path):
     # --- FIGURE 1: Inducing Variables & Positions (2x3 Grid) ---
@@ -222,9 +195,9 @@ def plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_tru
     plt.savefig(energy_plot_path)
     print(f"Energy parity plots saved to: {energy_plot_path}")
 
-def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path):
-    num_points = 100
-    num_samples = 200 # Number of GP posterior samples to draw
+def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path, step):
+    num_points = 50
+    # num_samples = 200 # Number of GP posterior samples to draw
     gamma = jnp.linspace(0.0, 1.0, num_points)
     
     # Define deformation modes in a dictionary for easy iteration
@@ -257,8 +230,8 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path):
     modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 1].set(gamma) # Standard simple shear gamma
 
     # JIT compile the vmapped prediction function
-    psi_pred_func = jax.jit(jax.vmap(learned_gp.psi, in_axes=(0, None)))
-    psi_dist = jax.jit(jax.vmap(learned_gp.psi_dist))
+    # psi_pred_func = jax.vmap(learned_gp.psi, in_axes=(0, None))
+    psi_dist = jax.vmap(learned_gp.psi_dist)
     # psi_mean = psi_dist.mean
     # psi_var = psi_dist.var
 
@@ -278,11 +251,11 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path):
         ax.plot(gamma, psi_true, label="True", color="grey", linewidth=2.5, zorder=5)
 
         # 2. Plot GP Samples
-        for i in range(num_samples):
-            # Pass a unique key for each sample
-            psi_sample = psi_pred_func(F_mode, jr.PRNGKey(i))
-            label = "GP Samples" if i == 0 else None
-            ax.plot(gamma, psi_sample, color="royalblue", alpha=0.1, linewidth=0.8, label=label, zorder=1)
+        # for i in range(num_samples):
+        #     # Pass a unique key for each sample
+        #     psi_sample = psi_pred_func(F_mode, jr.PRNGKey(i))
+        #     label = "GP Samples" if i == 0 else None
+        #     ax.plot(gamma, psi_sample, color="royalblue", alpha=0.1, linewidth=0.8, label=label, zorder=1)
         psi_mean = psi_dist(F_mode).mean
         psi_var = psi_dist(F_mode).var
         psi_std = jnp.sqrt(psi_var)
@@ -316,7 +289,7 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
     # Save the combined validation figure
-    save_file = os.path.join(save_path, "material_modes_validation.png")
+    save_file = os.path.join(save_path, f"material_modes_validation_{step}.png")
     plt.savefig(save_file)
     print(f"Loading mode validation plots saved to: {save_file}")
 
@@ -385,20 +358,28 @@ def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
     axes2[0].scatter(dev_z[:, 0] - 3, dev_z[:, 1] - 3, color = "red", marker='x')
     axes2[1].scatter(dev_z[:, 0] - 3, (vol_z[:, 0] - 1)**2, color = "red", marker='x')
     axes2[2].scatter(dev_z[:, 1] - 3, (vol_z[:, 0] - 1)**2, color = "red", marker='x')
-
+    linestyles = {
+        "Uniaxial Tension": "-",
+        "Uniaxial Compression": "--",
+        "Equibiaxial Tension": "-.",
+        "Equibiaxial Compression": ":",
+        "Pure Shear": (0, (3, 1, 1, 1)),
+        "Simple Shear": (0, (5, 2))
+    }
     for mode_name, F_stack in modes.items():
         i, _  = jax.vmap(invariants_and_derivatives)(F_stack)
         js = jnp.sqrt(i[:, 2])
         i1_bar = js**(-2/3) * i[:, 0]
         i2_bar = js**(-4/3) * i[:, 1]
         # Plot 1: I1_bar - 3 vs I2_bar - 3
-        axes2[0].plot(i1_bar - 3, i2_bar - 3, label=mode_name)
+        axes2[0].plot(i1_bar - 3, i2_bar - 3, label=mode_name,linestyle=linestyles[mode_name])
+        
 
         # Plot 2: I1_bar - 3 vs (J - 1)**2
-        axes2[1].plot(i1_bar - 3, (js - 1)**2, label=mode_name)
+        axes2[1].plot(i1_bar - 3, (js - 1)**2, label=mode_name,linestyle=linestyles[mode_name])
         
         # Plot 3: I2_bar - 3 vs (J - 1)**2
-        axes2[2].plot(i2_bar - 3, (js - 1)**2, label=mode_name)
+        axes2[2].plot(i2_bar - 3, (js - 1)**2, label=mode_name,linestyle=linestyles[mode_name])
     # Labeling Figure 2
     axes2[0].set_title(r"$\bar{I}_1-3$ vs $\bar{I}_2-3$")
     axes2[1].set_title(r"$\bar{I}_1-3$ vs $(J-1)^2$")

@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import gpjax as gpx
 # -------------------------------
 # Tensor utility functions
 # -------------------------------
@@ -175,8 +174,6 @@ def deformation_gradient_element(coords_elem, disp_elem):
     F = jnp.eye(2) + gradu
     return F, dNdx
 
-import jax.numpy as jnp
-
 def detrend_3d_jax(X, y):
     N = X.shape[0]
     X_design = jnp.hstack([jnp.ones((N, 1)), X])  # shape (N, 4)
@@ -202,3 +199,39 @@ def invariants_and_derivatives(F):
     dI3_dF = 2*jnp.linalg.det(f)**2 * jnp.linalg.inv(f).T
     dI_dF = jnp.stack([dI1_dF, dI2_dF, dI3_dF])  # (3,2,2)
     return jnp.array([I1, I2, I3]), dI_dF
+
+
+def farthest_point_sampling(pts, num_samples):
+    """
+    pts: (N, 3) array of points
+    num_samples: 25
+    """
+    n_pts = pts.shape[0]
+    # Initialize: pick the first point in the list as the start
+    selected_indices = jnp.zeros(num_samples, dtype=jnp.int32)
+    
+    # Track the distance from every point to its NEAREST selected point
+    # Start with infinity
+    dist_to_set = jnp.full((n_pts,), jnp.inf)
+    
+    def scan_body(dist_to_set, i):
+        # The next point is the one farthest from the current set
+        idx = jnp.argmax(dist_to_set)
+        
+        # Calculate distance from the new point to all other points
+        new_pt = pts[idx]
+        dists = jnp.sum((pts - new_pt)**2, axis=-1) # Squared Euclidean
+        
+        # Update distances: dist to set is min(old_dist, dist_to_new_point)
+        dist_to_set = jnp.minimum(dist_to_set, dists)
+        
+        return dist_to_set, idx
+
+    # We manually pick the first point to start
+    first_idx = 0
+    dist_to_set = jnp.sum((pts - pts[first_idx])**2, axis=-1)
+    
+    # Run the loop for the remaining 24 points
+    _, remaining_indices = jax.lax.scan(scan_body, dist_to_set, jnp.arange(1, num_samples))
+    
+    return jnp.concatenate([jnp.array([first_idx]), remaining_indices])

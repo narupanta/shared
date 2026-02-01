@@ -8,14 +8,14 @@ from jaxtyping import install_import_hook
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import optax
-from core.model import SparseHyperelasticityGP, transform_input_features, enforce_softplus_positive
+from core.model import SparseHyperelasticityGP, transform_input_features, enforce_softplus_positive, GPRawParams, GPParams, GPWeights
 from core.material_models import get_material
 import jax
 import jax.numpy as jnp
 from core.utils import *
 import datetime
 import os
-
+from tqdm import tqdm
 from core.datasetclass import TractionDataset
 from core.loss_function import physical_loss, elbo_loss, total_loss
 from core.plotter import \
@@ -74,8 +74,8 @@ if __name__ == "__main__" :
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     save_path = os.path.join(base_save_path, timestamp)
     os.makedirs(save_path, exist_ok=True)
-    material_model = "Isihara"
-    dataset_name = "Isihara"
+    material_model = "gentthomas"
+    dataset_name = "gentthomas"
     dataset = TractionDataset("dataset", dataset_name)
     F_all = []
     reactions = []
@@ -88,17 +88,19 @@ if __name__ == "__main__" :
         coords = data["mesh_pos"][:,:2]
         cells = data["cells"]
         # u = data["u"]
-        percent_noise = 0.0000
+        u_percent_noise = 0.00001
         node_type = data["node_type"]
         ux = data["u"][:, 0]
-        ux[(data["node_type"] != 1)] += np.random.normal(0, percent_noise * 1, ux.shape)[(data["node_type"] != 1)]
+        # ux[(data["node_type"] != 1)] += np.random.normal(0, percent_noise * 1, ux.shape)[(data["node_type"] != 1)]
         uy = data["u"][:, 1]
-        uy[(data["node_type"] != 2)] += np.random.normal(0, percent_noise * 1, uy.shape)[(data["node_type"] != 2)]
+        # uy[(data["node_type"] != 2)] += np.random.normal(0, percent_noise * 1, uy.shape)[(data["node_type"] != 2)]
 
         # Combine components into the full displacement vector u
         u = np.column_stack((ux, uy))
         # u[node_type == 0] = u[node_type == 0] + jax.random.normal(jr.key(0), u.shape)[node_type == 0] * 0.01 * mean_u
-        load = data["load"]
+        load_noise = 0.03
+        load = data["load"] 
+        load += np.random.normal(0, load_noise * load, load.shape)
         reaction = data["reaction"]
         coord_cells = coords[cells]
         u_cells = u[cells]
@@ -128,35 +130,69 @@ if __name__ == "__main__" :
     plot_inducing_points(dev_z, vol_z, I_all_dev, j, save_path)
     I_z = jnp.concat([dev_z, vol_z], axis = -1)
 
-    params = {
-        "raw_dev_gp_lengthscales" : jnp.array([1.0, 1.0]), 
-        "raw_vol_gp_lengthscales" : jnp.array([1.0]), 
-        "raw_dev_gp_sigma_scaling" : 1.0,
-        "raw_vol_gp_sigma_scaling" : 1.0,
-        "raw_dev_z" : dev_z,
-        "raw_dev_u_mean" : jnp.zeros((n_ip,)),
-        "raw_dev_u_var" : jnp.ones((n_ip,)),
-        "raw_vol_z" : vol_z,
-        "raw_vol_u_mean" : jnp.zeros((n_ip,)),
-        "raw_vol_u_var" : jnp.ones((n_ip,)),
-        "log_sigma_physic": 1.0,
-        "log_sigma_glob": 1.0,
-        "raw_c20": 1.0,
-        "raw_c02": 1.0,
-        "raw_c11": 1.0,
-        "raw_c10": 1.0,
-        "raw_c01": 1.0,
-        "raw_k": 1.0,
-        "raw_q": 1.0
-    }
+    # params = {
+    #     "raw_dev_gp_lengthscales" : jnp.array([1.0, 1.0]), 
+    #     "raw_vol_gp_lengthscales" : jnp.array([1.0]), 
+    #     "raw_dev_gp_sigma_scaling" : jnp.array(1.0), # Wrapped
+    #     "raw_vol_gp_sigma_scaling" : jnp.array(1.0), # Wrapped
+    #     "raw_dev_z" : dev_z,
+    #     "raw_dev_u_mean" : jnp.zeros((n_ip,)),
+    #     "raw_dev_u_var" : jnp.ones((n_ip,)),
+    #     "raw_vol_z" : vol_z,
+    #     "raw_vol_u_mean" : jnp.zeros((n_ip,)),
+    #     "raw_vol_u_var" : jnp.ones((n_ip,)),
+    #     "log_sigma_physic": jnp.array(1.0), # Wrapped
+    #     "log_sigma_glob": jnp.array(1.0),   # Wrapped
+    #     "raw_c20": jnp.array(1.0),          # Wrapped
+    #     "raw_c02": jnp.array(1.0),          # Wrapped
+    #     "raw_c11": jnp.array(1.0),          # Wrapped
+    #     "raw_c10": jnp.array(1.0),          # Wrapped
+    #     "raw_c01": jnp.array(1.0),          # Wrapped
+    #     "raw_k": jnp.array(1.0),            # Wrapped
+    #     "raw_q": jnp.array(1.0)             # Wrapped
+    # }
+    params = GPRawParams(
+        raw_dev_ls=jnp.array([1.0, 1.0]),
+        raw_dev_sig=jnp.array(1.0),
+        raw_dev_u_mean=jnp.zeros((n_ip,)),
+        raw_dev_u_var=jnp.ones((n_ip,)),
+
+        raw_vol_ls=jnp.array([1.0]),
+        raw_vol_sig=jnp.array(1.0),
+        raw_vol_u_mean=jnp.zeros((n_ip,)),
+        raw_vol_u_var=jnp.ones((n_ip,)),
+
+        raw_c01=jnp.array(1.0),
+        raw_c02=jnp.array(1.0),
+        raw_c10=jnp.array(1.0),
+        raw_c11=jnp.array(1.0),
+        raw_c20=jnp.array(1.0),
+        raw_k=jnp.array(1.0),
+        raw_q=jnp.array(1.0),
+
+        log_sigma_phys=jnp.array(1.0),
+        log_simga_glob=jnp.array(1.0)
+    )
+    def calculate_min_ls(z):
+        # For a 2D/3D point cloud, a quick way is to use the 
+        # average distance to the nearest neighbor.
+        from sklearn.neighbors import NearestNeighbors
+        nbrs = NearestNeighbors(n_neighbors=2).fit(z)
+        distances, _ = nbrs.kneighbors(z)
+        avg_dist = jnp.mean(distances[:, 1])
+        return avg_dist * 0.5 # Minimum allowable lengthscale
+    
+    min_dev = calculate_min_ls(dev_z)
+    min_vol = calculate_min_ls(vol_z)
 
     main_key = jr.PRNGKey(42)
-    model = SparseHyperelasticityGP(params, I_z)
-    # model_path = "/home/mmdiscovery/shared/saved_model/20260129T135256/" # Replace with the actual path to your saved model
-    # with open(os.path.join(model_path, "best_params.npy"), "rb") as f:
-    #     load_params = jnp.load(f, allow_pickle=True).item()
-    # model.params = model.load_params(load_params)
-    # params = load_params
+    model = SparseHyperelasticityGP(params, I_z, min_dev, min_vol)
+    model_path = "/home/mmdiscovery/shared/saved_model/20260131T104933/" # Replace with the actual path to your saved model
+    with open(os.path.join(model_path, "best_params.npy"), "rb") as f:
+        loaded_dict = jnp.load(f, allow_pickle=True).item()
+        loaded_params = GPRawParams(**loaded_dict)
+    model.params = model.load_params(loaded_params)
+    params = loaded_params
     # loss_and_grad = jax.jit(jax.value_and_grad(
     #     lambda p, k: elbo_loss(p, model, coord_cells, cells, u_cells, coords.shape[0], node_type, load_parameter, k),
     #     has_aux=True
@@ -202,12 +238,32 @@ if __name__ == "__main__" :
         "dev_u_mean": [], "dev_u_var": [], "vol_u_mean": [], "vol_u_var": [], "dev_z": [], "vol_z": [],
         "sigma_physic": [], "c20": [], "c02": [], "c11": [], "c10": [], "c01": [], "k": [], "q": []
     }
+    # import optax
+    # from tqdm import tqdm
+    # import jaxopt
+    # # trainable parameters
+    # # params = jnp.zeros(6) 
+    # def loss_fn(p):
+    #     loss_val, aux = total_loss(p, model, u_array, loads, reactions_array, coords, cells, node_type, None)
+    #     return loss_val
 
-    for step in range(20000):
+    #     # return total_loss(p, model, u_array, loads, reactions_array, coords, cells, node_type, k)[0]
+    # solver = jaxopt.LBFGS(fun=loss_fn, maxiter=500, verbose = True)
+
+    # # 3. Use jax.lax.scan for the inner loop (if doing multiple restarts/steps)
+    # # However, for L-BFGS, usually one call to .run() is enough
+    # res = solver.run(params)
+    # params = res.params
+    # print(f"Final loss: {res.state.error}")
+    total_step = 50000
+    pbar = tqdm(range(total_step), desc="Training Sparse GP", unit="step")
+    true_model = get_material(material_model.lower())
+    for step in pbar:
         main_key, subkey = jr.split(main_key)
         
+        # JAX execution
         (loss, (log_like_loss, kl_loss, phy_loss, phys_loss2)), grads = loss_and_grad(params, subkey)
-    
+
         updates, opt_state = opt.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         
@@ -217,70 +273,110 @@ if __name__ == "__main__" :
             best_params = params
 
         if step % 50 == 0:
-            # Format the log entry
-            log_message = (
+            # Update the progress bar postfix with current metrics
+            # This shows up right next to the time left
+            pbar.set_postfix({
+                "loss": f"{loss:.4f}",
+                "phy": f"{phy_loss:.4f}",
+                "phy2": f"{phys_loss2:.4f}"
+            })
 
+            # --- Your existing logging logic ---
+            # Note: Using pbar.write() instead of print() prevents 
+            # the progress bar from breaking into multiple lines.
+            log_message = (
                 f"step {step:04d} | loss={loss:.6f} | "
-                f"log_like={log_like_loss:.6f} | kl={kl_loss:.6f} | phy={phy_loss:.6f} | phy2 ={phys_loss2:.6f}\n"
+                f"log_like={log_like_loss:.6f} | kl={kl_loss:.6f} | "
+                f"phy={phy_loss:.6f} | phy2 ={phys_loss2:.6f}\n"
             )
-            
-            # Cleanly format params for readability
+            cur_params = model.load_params(params)
             clean_params = jax.tree_util.tree_map(
                 lambda x: x.tolist() if hasattr(x, 'tolist') else x, 
-                params
+                cur_params
             )
             log_message += f"params: {clean_params}\n"
             log_message += "-"*50 + "\n"
-
-            # Print to console
-            print(f"step {step:04d}  loss={loss:.6f}, phy_loss = {phy_loss:.6f}, phy2 ={phys_loss2:.6f}")
-
-            # Append to log file
-            with open(log_file_path, "a") as f:
-                f.write(log_message)
-            
-            # Append to history lists
+            # ... (rest of your params_hist recording) ...
             steps_history.append(step)
-            
-            # Record Losses
             loss_components_hist["total_loss"].append(float(loss))
             loss_components_hist["log_like"].append(float(log_like_loss))
             loss_components_hist["kl"].append(float(kl_loss))
             loss_components_hist["phy"].append(float(phy_loss))
+            params_hist["dev_gp_sigma_scaling"].append(cur_params.dev_sig)
+            params_hist["vol_gp_sigma_scaling"].append(cur_params.vol_sig)
+            params_hist["dev_gp_lengthscales"].append(cur_params.dev_ls)
+            params_hist["vol_gp_lengthscales"].append(cur_params.vol_ls)
+            params_hist["dev_z"].append(model.dev_z)
+            params_hist["vol_z"].append(model.vol_z)
+            params_hist["dev_u_mean"].append(cur_params.dev_u_mean)
+            params_hist["dev_u_var"].append(cur_params.dev_u_var)
+            params_hist["vol_u_mean"].append(cur_params.vol_u_mean)
+            params_hist["vol_u_var"].append(cur_params.vol_u_var)
+            params_hist["sigma_physic"].append(cur_params.sigma_phys)
+            params_hist["c20"].append(cur_params.c20)
+            params_hist["c02"].append(cur_params.c02)
+            params_hist["c11"].append(cur_params.c11)
+            params_hist["c10"].append(cur_params.c10)
+            params_hist["c01"].append(cur_params.c01)
+            params_hist["k"].append(cur_params.k)
+            params_hist["q"].append(cur_params.q)
+            # Append to log file
+            with open(log_file_path, "a") as f:
+                f.write(log_message)
+        if step % (total_step//10) == 0 and step != 0:
             
-            # Record Parameters (applying exp where necessary)
-            params_hist["dev_gp_sigma_scaling"].append(jnp.exp(params["raw_dev_gp_sigma_scaling"]))
-            params_hist["vol_gp_sigma_scaling"].append(jnp.exp(params["raw_vol_gp_sigma_scaling"]))
-            params_hist["dev_gp_lengthscales"].append(jnp.exp(params["raw_dev_gp_lengthscales"]))
-            params_hist["vol_gp_lengthscales"].append(jnp.exp(params["raw_vol_gp_lengthscales"]))
-            params_hist["dev_z"].append(params["raw_dev_z"])
-            params_hist["vol_z"].append(params["raw_vol_z"])
-            # params_hist["dev_u_mean"].append(params["raw_dev_u_mean"])
-            # params_hist["dev_u_var"].append(enforce_softplus_positive(params["raw_dev_u_var"]))
-            # params_hist["vol_u_mean"].append(params["raw_vol_u_mean"])
-            # params_hist["vol_u_var"].append(enforce_softplus_positive(params["raw_vol_u_var"]))
-            params_hist["dev_u_mean"].append(enforce_softplus_positive(params["raw_dev_u_mean"]))
-            params_hist["dev_u_var"].append(enforce_softplus_positive(params["raw_dev_u_var"]))
-            params_hist["vol_u_mean"].append(enforce_softplus_positive(params["raw_vol_u_mean"]))
-            params_hist["vol_u_var"].append(enforce_softplus_positive(params["raw_vol_u_var"]))
-            params_hist["sigma_physic"].append(np.exp(float(params["log_sigma_physic"])))
-            params_hist["c20"].append(enforce_softplus_positive(float(params["raw_c20"])))
-            params_hist["c02"].append(enforce_softplus_positive(float(params["raw_c02"])))
-            params_hist["c11"].append(enforce_softplus_positive(float(params["raw_c11"]))) 
-            params_hist["c10"].append(enforce_softplus_positive(float(params["raw_c10"])))
-            params_hist["c01"].append(enforce_softplus_positive(float(params["raw_c01"])))
-            params_hist["k"].append(enforce_softplus_positive(float(params["raw_k"])))
-            params_hist["q"].append(enforce_softplus_positive(float(params["raw_q"])))
+            plot_model = SparseHyperelasticityGP(best_params, I_z, min_dev, min_vol)
+            plot_model.params = plot_model.load_params(best_params)
+            plot_model.gpweight = plot_model.precompute_weights(best_params)
             
+            plot_ut_ebt_ps_uc_ebc_ss(plot_model, true_model, save_path, step)
+            # plot material_modes_validation_step.png
 
+    # for step in range(20000):
+    #     main_key, subkey = jr.split(main_key)
+        
+    #     (loss, (log_like_loss, kl_loss, phy_loss, phys_loss2)), grads = loss_and_grad(params, subkey)
+    
+    #     updates, opt_state = opt.update(grads, opt_state)
+    #     params = optax.apply_updates(params, updates)
+        
+    #     losses.append(loss)
+    #     if loss < best_loss:
+    #         best_loss = loss
+    #         best_params = params
 
+    #     if step % 50 == 0:
+    #         # Format the log entry
+    #         log_message = (
 
-            # Keep your history lists updated
+    #             f"step {step:04d} | loss={loss:.6f} | "
+    #             f"log_like={log_like_loss:.6f} | kl={kl_loss:.6f} | phy={phy_loss:.6f} | phy2 ={phys_loss2:.6f}\n"
+    #         )
+            
+    #         # Cleanly format params for readability
+    #         clean_params = jax.tree_util.tree_map(
+    #             lambda x: x.tolist() if hasattr(x, 'tolist') else x, 
+    #             params
+    #         )
+    #         log_message += f"params: {clean_params}\n"
+    #         log_message += "-"*50 + "\n"
+
+    #         # Print to console
+    #         print(f"step {step:04d}  loss={loss:.6f}, phy_loss = {phy_loss:.6f}, phy2 ={phys_loss2:.6f}")
+
+    #         # Append to log file
+    #         with open(log_file_path, "a") as f:
+    #             f.write(log_message)
+            
+    #         # Append to history lists
+    #         steps_history.append(step)
+            
+    #         # Record Losses
 
 
     # Final Save
     with open(os.path.join(save_path, "best_params.npy"), "wb") as f:
-        jnp.save(f, best_params)
+        jnp.save(f, best_params._asdict())
     with open(os.path.join(save_path, "I_z.npy"), "wb") as f:
         jnp.save(f, I_z)
     with open(os.path.join(save_path, "I_obs_all.npy"), "wb") as f:
@@ -293,7 +389,7 @@ if __name__ == "__main__" :
     plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_path)
     plot_parameters_hist(params_hist, steps_history, save_path)
 
-    learned_gp = SparseHyperelasticityGP(best_params, I_z)
+    learned_gp = SparseHyperelasticityGP(best_params, I_z, min_dev, min_vol)
 
     # f = jax.vmap(fto3x3)(F)
     # psi_pred = jax.vmap(learned_gp.psi, in_axes=(0,None))(f, None)
@@ -310,5 +406,5 @@ if __name__ == "__main__" :
     # psi_vol_true = 1.5 * (j - 1)**2
 
     # plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_true, psi_vol_pred, psi_vol_true, save_path)
-    plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path)
+    plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path, step)
     plot_stress_validation(learned_gp, true_model, save_path)
