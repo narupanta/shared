@@ -254,6 +254,44 @@ class GentThomas(BaseMaterialModel):
         term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2 + term3
 
+@register_material("neohookean4")
+class GentThomas(BaseMaterialModel):
+    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        self.c1 = c1
+        self.c2 = c2
+
+    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+        C = C_func(F)
+        I1 = I1_func(C)
+        I2 = I2_func(C)
+        I3 = I3_func(C) 
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
+        term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**4
+        return term1 + term3
+    
+@register_material("haineswilson")
+class GentThomas(BaseMaterialModel):
+    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        self.c1 = c1
+        self.c2 = c2
+
+    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+        C = C_func(F)
+        I1 = I1_func(C)
+        I2 = I2_func(C)
+        I3 = I3_func(C) 
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
+        term2 = 1.0 * (I3_safe**(-2/3) * I2 - 3)
+        term3 = 0.7 * (I3_safe**(-1/3) * I1 - 3) * (I3_safe**(-2/3) * I2 - 3)
+        term4 = 0.2 * (I3_safe**(-1/3) * I1 - 3)**3
+        term5 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
+        return term1 + term2 + term3 + term4 + term5
+
+
 # ------------------------------
 # Example small tests / usage
 # ------------------------------
