@@ -72,8 +72,8 @@ if __name__ == "__main__" :
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     save_path = os.path.join(base_save_path, timestamp)
     os.makedirs(save_path, exist_ok=True)
-    material_model = "gentthomas"
-    dataset_name = "gentthomas"
+    material_model = "isihara"
+    dataset_name = "isihara_fix"
     dataset = TractionDataset("dataset", dataset_name)
     F_all = []
     reactions = []
@@ -86,7 +86,7 @@ if __name__ == "__main__" :
         coords = data["mesh_pos"][:,:2]
         cells = data["cells"]
         # u = data["u"]
-        u_percent_noise = 0.00001
+        u_percent_noise = 0.0001
         node_type = data["node_type"]
         ux = data["u"][:, 0]
         # ux[(data["node_type"] != 1)] += np.random.normal(0, percent_noise * 1, ux.shape)[(data["node_type"] != 1)]
@@ -96,13 +96,11 @@ if __name__ == "__main__" :
         # Combine components into the full displacement vector u
         u = np.column_stack((ux, uy))
         # u[node_type == 0] = u[node_type == 0] + jax.random.normal(jr.key(0), u.shape)[node_type == 0] * 0.01 * mean_u
-        load_noise = 0.03
-        load = data["load"] 
-        load += np.random.normal(0, load_noise * load, load.shape)
+
         reaction = data["reaction"]
         coord_cells = coords[cells]
         u_cells = u[cells]
-        
+        load = data["load"]
         F, dNdx = deformation_gradient_element(coord_cells, u_cells)
         loads.append(load)
         u_all.append(u)
@@ -116,7 +114,9 @@ if __name__ == "__main__" :
     reactions_array = jnp.array(reactions)
     u_array = jnp.array(u_all)
     loads = jnp.array(loads)
-
+    load_noise = 0.03
+    # check = jnp.mean(loads, axis = 0)
+    loads = loads + np.random.normal(0, load_noise * (jnp.max(loads) + jnp.min(loads)), loads.shape)
     I_all_dev, j = jax.vmap(transform_input_features)(I_obs_all)
 
     n_ip = 10
@@ -167,6 +167,7 @@ if __name__ == "__main__" :
         raw_c20=jnp.array(1.0),
         raw_k=jnp.array(1.0),
         raw_q=jnp.array(1.0),
+        raw_s=jnp.array(1.0),
 
         log_sigma_phys=jnp.array(1.0),
         log_simga_glob=jnp.array(1.0)
@@ -185,12 +186,12 @@ if __name__ == "__main__" :
 
     main_key = jr.PRNGKey(42)
     model = SparseHyperelasticityGP(params, I_z, min_dev, min_vol)
-    model_path = "/home/mmdiscovery/shared/saved_model/20260131T104933/" # Replace with the actual path to your saved model
-    with open(os.path.join(model_path, "best_params.npy"), "rb") as f:
-        loaded_dict = jnp.load(f, allow_pickle=True).item()
-        loaded_params = GPRawParams(**loaded_dict)
-    model.params = model.load_params(loaded_params)
-    params = loaded_params
+    # model_path = "/home/mmdiscovery/shared/saved_model/20260208T133142/" # Replace with the actual path to your saved model
+    # with open(os.path.join(model_path, "best_params.npy"), "rb") as f:
+    #     loaded_dict = jnp.load(f, allow_pickle=True).item()
+    #     loaded_params = GPRawParams(**loaded_dict)
+    # model.params = model.load_params(loaded_params)
+    # params = loaded_params
     # loss_and_grad = jax.jit(jax.value_and_grad(
     #     lambda p, k: elbo_loss(p, model, coord_cells, cells, u_cells, coords.shape[0], node_type, load_parameter, k),
     #     has_aux=True
@@ -253,7 +254,7 @@ if __name__ == "__main__" :
     # res = solver.run(params)
     # params = res.params
     # print(f"Final loss: {res.state.error}")
-    total_step = 50000
+    total_step = 50000*2
     pbar = tqdm(range(total_step), desc="Training Sparse GP", unit="step")
     true_model = get_material(material_model.lower())
     for step in pbar:
@@ -328,48 +329,6 @@ if __name__ == "__main__" :
             plot_model.gpweight = plot_model.precompute_weights(best_params)
             
             plot_ut_ebt_ps_uc_ebc_ss(plot_model, true_model, save_path, step)
-            # plot material_modes_validation_step.png
-
-    # for step in range(20000):
-    #     main_key, subkey = jr.split(main_key)
-        
-    #     (loss, (log_like_loss, kl_loss, phy_loss, phys_loss2)), grads = loss_and_grad(params, subkey)
-    
-    #     updates, opt_state = opt.update(grads, opt_state)
-    #     params = optax.apply_updates(params, updates)
-        
-    #     losses.append(loss)
-    #     if loss < best_loss:
-    #         best_loss = loss
-    #         best_params = params
-
-    #     if step % 50 == 0:
-    #         # Format the log entry
-    #         log_message = (
-
-    #             f"step {step:04d} | loss={loss:.6f} | "
-    #             f"log_like={log_like_loss:.6f} | kl={kl_loss:.6f} | phy={phy_loss:.6f} | phy2 ={phys_loss2:.6f}\n"
-    #         )
-            
-    #         # Cleanly format params for readability
-    #         clean_params = jax.tree_util.tree_map(
-    #             lambda x: x.tolist() if hasattr(x, 'tolist') else x, 
-    #             params
-    #         )
-    #         log_message += f"params: {clean_params}\n"
-    #         log_message += "-"*50 + "\n"
-
-    #         # Print to console
-    #         print(f"step {step:04d}  loss={loss:.6f}, phy_loss = {phy_loss:.6f}, phy2 ={phys_loss2:.6f}")
-
-    #         # Append to log file
-    #         with open(log_file_path, "a") as f:
-    #             f.write(log_message)
-            
-    #         # Append to history lists
-    #         steps_history.append(step)
-            
-    #         # Record Losses
 
 
     # Final Save

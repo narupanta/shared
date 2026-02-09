@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+from sklearn.neighbors import NearestNeighbors
 # -------------------------------
 # Tensor utility functions
 # -------------------------------
@@ -186,6 +187,13 @@ def detrend_3d_jax(X, y):
 
     return y_detrended, beta, trend
 
+def calculate_min_ls(z):
+    # For a 2D/3D point cloud, a quick way is to use the 
+    # average distance to the nearest neighbor.
+    nbrs = NearestNeighbors(n_neighbors=2).fit(z)
+    distances, _ = nbrs.kneighbors(z)
+    avg_dist = jnp.mean(distances[:, 1])
+    return avg_dist * 0.5 # Minimum allowable lengthscale
 
 def invariants_and_derivatives(F):
     f = fto3x3(F)
@@ -235,3 +243,14 @@ def farthest_point_sampling(pts, num_samples):
     _, remaining_indices = jax.lax.scan(scan_body, dist_to_set, jnp.arange(1, num_samples))
     
     return jnp.concatenate([jnp.array([first_idx]), remaining_indices])
+
+def transform_input_features(invariants) :
+    i3 = jnp.maximum(invariants[2], 1e-6)
+    j = jnp.sqrt(i3)
+    i1_dev = i3**(-1/3)*invariants[0]
+    i2_dev = i3**(-2/3)*invariants[1]
+    dev_feature = jnp.stack([i1_dev, i2_dev], axis = -1)
+    # vol_feature = jnp.stack([j, -2 * j], axis = -1)
+    vol_feature = jnp.array([j])
+
+    return dev_feature, vol_feature

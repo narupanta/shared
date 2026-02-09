@@ -47,11 +47,11 @@ def total_loss(p, model, u_array, loads, reactions, coords, cells, node_type, ke
 def ell(sigma_physic, sigma_glob, u_array, loads, reactions, piola_func, coords, cells, node_type, key) :
 
     sum_free_loss, sum_fix_loss = total_physical_loss(u_array, loads, reactions, piola_func, coords, cells, node_type)
-    free_dofs = u_array.shape[0] * (u_array.shape[1] * u_array.shape[2] - jnp.sum((node_type == 1))/2 - jnp.sum(node_type == 2)/2) 
+    free_dofs = u_array.shape[0] * (u_array.shape[1] * u_array.shape[2] - jnp.sum((node_type[:, 1] == 1))/2 - jnp.sum(node_type[:, 2] == 1)/2) 
     # n_reaction = reactions.shape[0] * reactions.shape[1]
 
     free_log_likelihood = - (1.0 / (2 * (sigma_physic**2))) * sum_free_loss - free_dofs/2.0 * jnp.log(2 * jnp.pi * (sigma_physic**2))
-    fix_log_likelihood = - (1.0 / (2 * (sigma_glob**2))) * sum_fix_loss - 2/2.0 * jnp.log(2 * jnp.pi * (sigma_glob**2))
+    fix_log_likelihood = - (1.0 / (2 * (sigma_glob**2))) * sum_fix_loss - u_array.shape[0]*2/2.0 * jnp.log(2 * jnp.pi * (sigma_glob**2))
     expected_log_likelihood = fix_log_likelihood + free_log_likelihood
     return expected_log_likelihood, (sum_free_loss, sum_fix_loss)
 
@@ -108,20 +108,46 @@ def external_work(u, coords, cells, node_type, load):
 def physical_loss_per_loadstep_force_controlled(u, load, reactions, psi, coords, cells, node_type):
     # psi = jax.vmap(material_model.phi)
 
+    # f_int_nodes = jax.grad(total_energy)(u, psi, coords, cells)
+
+    # f_ext_nodes = jax.grad(external_work)(u, coords, cells, node_type, load)
+    # R_nodes = f_int_nodes - f_ext_nodes
+    # r_free0 = R_nodes[(node_type!=1) & (node_type!= 2)]**2
+    # r_free1 = R_nodes[node_type==1, 1]**2
+    # r_free2 = R_nodes[node_type==2, 0]**2
+    # # free_r_total = jnp.sum(r_free0**2) + jnp.sum(r_free1**2) + jnp.sum(r_free2**2)
+    # fixed_nodes_loss1 = (jnp.sum(R_nodes[node_type == 1, 0]) - reactions[0])**2
+    # fixed_nodes_loss2 = (jnp.sum(R_nodes[node_type == 2, 1]) - reactions[1])**2 
+    # # reaction_loss = fixed_nodes_loss1 + fixed_nodes_loss2
+    # free_loss = jnp.concat([r_free0.flatten(), r_free1, r_free2]) 
+    # fix_loss = jnp.stack([fixed_nodes_loss1, fixed_nodes_loss2])
+
     f_int_nodes = jax.grad(total_energy)(u, psi, coords, cells)
 
     f_ext_nodes = jax.grad(external_work)(u, coords, cells, node_type, load)
     R_nodes = f_int_nodes - f_ext_nodes
-    r_free0 = R_nodes[(node_type!=1) & (node_type!= 2)]**2
-    r_free1 = R_nodes[node_type==1, 1]**2
-    r_free2 = R_nodes[node_type==2, 0]**2
+    r_free0 = R_nodes[(node_type[:, 1] != 1) & (node_type[:, 2] != 1)]**2
+    r_free1 = R_nodes[node_type[:, 1] == 1, 1]**2
+    r_free2 = R_nodes[node_type[:, 2] == 1, 0]**2
     # free_r_total = jnp.sum(r_free0**2) + jnp.sum(r_free1**2) + jnp.sum(r_free2**2)
-    fixed_nodes_loss1 = (jnp.sum(R_nodes[node_type == 1, 0]) - reactions[0])**2
-    fixed_nodes_loss2 = (jnp.sum(R_nodes[node_type == 2, 1]) - reactions[1])**2 
+    ext_force = jnp.sum(f_ext_nodes, axis = 0)
+    fixed_nodes_loss1 = (jnp.sum(R_nodes[node_type[:, 1] == 1, 0]) + ext_force[0])**2
+    fixed_nodes_loss2 = (jnp.sum(R_nodes[node_type[:, 2] == 1, 1]) + ext_force[1])**2 
     # reaction_loss = fixed_nodes_loss1 + fixed_nodes_loss2
+
     free_loss = jnp.concat([r_free0.flatten(), r_free1, r_free2]) 
     fix_loss = jnp.stack([fixed_nodes_loss1, fixed_nodes_loss2])
     return free_loss, fix_loss
+
+def force_residual_force_controlled(u, load, reactions, psi, coords, cells, node_type):
+    # psi = jax.vmap(material_model.phi)
+
+    f_int_nodes = jax.grad(total_energy)(u, psi, coords, cells)
+
+    f_ext_nodes = jax.grad(external_work)(u, coords, cells, node_type, load)
+    R_nodes = f_int_nodes - f_ext_nodes
+    return R_nodes
+
 # def physical_loss_per_loadstep_force_controlled(u, load, reaction, piola_func, coords, cells, node_type) :
 #     u_cells = u[cells]
 #     coord_cells = coords[cells]
@@ -227,48 +253,78 @@ def physical_loss_per_loadstep(u, reaction, piola_func, coords, cells, node_type
 
 
 
-def _neumann_cell_force(coords_el, types_el, t3, t4):
+# def _neumann_cell_force(coords_el, types_el, t3, t4):
+    # """
+    # coords_el: (3,2) float - coordinates of the 3 nodes of the element
+    # types_el:  (3,) int - node_type for these 3 nodes (global node_type[cells])
+    # t3, t4: scalars - traction magnitudes for types 3 and 4
+    # returns: (3,2) local nodal traction vector for this element
+    # """
+    # edges = jnp.array([[0, 1],
+    #                    [1, 2],
+    #                    [2, 0]])  # three local edges
+    # f_cell = jnp.zeros((3, 2))
+
+    # def body_fun(idx, f):
+    #     i = edges[idx, 0]
+    #     j = edges[idx, 1]
+
+    #     ti = types_el[i]
+    #     tj = types_el[j]
+
+    #     # Only apply traction if both nodes of the edge have the same neumann type.
+    #     is_right = (ti == 3) & (tj == 3)
+    #     is_top   = (ti == 4) & (tj == 4)
+
+    #     # choose traction vector for edge
+    #     t_edge = jnp.where(is_right, jnp.array([t3, 0.0]),
+    #              jnp.where(is_top,   jnp.array([0.0, t4]),
+    #                                      jnp.array([0.0, 0.0])))
+
+    #     xi = coords_el[i]
+    #     xj = coords_el[j]
+    #     L = jnp.linalg.norm(xj - xi)
+
+    #     # nodal contribution from this edge: each edge contributes L/2 * T to each of its two nodes
+    #     fe_local = 0.5 * L * t_edge  # shape (2,)
+
+    #     f = f.at[i].add(fe_local)
+    #     f = f.at[j].add(fe_local)
+    #     return f
+
+    # f_cell = jax.lax.fori_loop(0, 3, body_fun, f_cell)
+    # return f_cell  # (3,2)
+
+def _neumann_cell_force(coords_el, onehot_types_el, t3, t4):
     """
-    coords_el: (3,2) float - coordinates of the 3 nodes of the element
-    types_el:  (3,) int - node_type for these 3 nodes (global node_type[cells])
-    t3, t4: scalars - traction magnitudes for types 3 and 4
-    returns: (3,2) local nodal traction vector for this element
+    onehot_types_el: (3, 5) array - one-hot encoded types for 3 nodes
+    Columns: [0: Internal, 1: FixX, 2: FixY, 3: Right(t3), 4: Top(t4)]
     """
-    edges = jnp.array([[0, 1],
-                       [1, 2],
-                       [2, 0]])  # three local edges
+    edges = jnp.array([[0, 1], [1, 2], [2, 0]])
     f_cell = jnp.zeros((3, 2))
 
-    def body_fun(idx, f):
-        i = edges[idx, 0]
-        j = edges[idx, 1]
+    for idx in range(3):
+        i, j = edges[idx]
+        
+        # Check if BOTH nodes on this edge share the Neumann 'Right' bit (index 3)
+        is_right = (onehot_types_el[i, 3] == 1) & (onehot_types_el[j, 3] == 1)
+        
+        # Check if BOTH nodes on this edge share the Neumann 'Top' bit (index 4)
+        is_top = (onehot_types_el[i, 4] == 1) & (onehot_types_el[j, 4] == 1)
 
-        ti = types_el[i]
-        tj = types_el[j]
+        L = jnp.linalg.norm(coords_el[j] - coords_el[i])
 
-        # Only apply traction if both nodes of the edge have the same neumann type.
-        is_right = (ti == 3) & (tj == 3)
-        is_top   = (ti == 4) & (tj == 4)
+        # Apply forces independently
+        # The corner edge connecting a 'Type 3' and a 'Type 4' node 
+        # will now correctly pass the check if you set the corner's 
+        # one-hot bits for both 3 and 4 to 1.
+        f_cell = f_cell.at[i, 0].add(jnp.where(is_right, 0.5 * L * t3, 0.0))
+        f_cell = f_cell.at[j, 0].add(jnp.where(is_right, 0.5 * L * t3, 0.0))
+        
+        f_cell = f_cell.at[i, 1].add(jnp.where(is_top, 0.5 * L * t4, 0.0))
+        f_cell = f_cell.at[j, 1].add(jnp.where(is_top, 0.5 * L * t4, 0.0))
 
-        # choose traction vector for edge
-        t_edge = jnp.where(is_right, jnp.array([t3, 0.0]),
-                 jnp.where(is_top,   jnp.array([0.0, t4]),
-                                         jnp.array([0.0, 0.0])))
-
-        xi = coords_el[i]
-        xj = coords_el[j]
-        L = jnp.linalg.norm(xj - xi)
-
-        # nodal contribution from this edge: each edge contributes L/2 * T to each of its two nodes
-        fe_local = 0.5 * L * t_edge  # shape (2,)
-
-        f = f.at[i].add(fe_local)
-        f = f.at[j].add(fe_local)
-        return f
-
-    f_cell = jax.lax.fori_loop(0, 3, body_fun, f_cell)
-    return f_cell  # (3,2)
-
+    return f_cell
 
 def physical_loss(params, model, coords, cells, u,
                   n_nodes, node_type, load_parameter, key = None):
