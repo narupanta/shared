@@ -254,70 +254,15 @@ class BenchmarkDataset:
         data = dict(F = F, P = P_from_mm, sigma = sigma, coeffs = coeffs, invariants = invariants, 
                     cells = cells, coords_elems = coords_elems, disp_elems = disp_elems, bc = bc, reaction_forces = reaction_forces)
         return data
-class TestSpecimen :
-    def __init__(self, data_dir: os.PathLike, mat_model: str):
-        self.data_dir = data_dir
-        self.mat_model = mat_model
-        self.mat_model_path = os.path.join(data_dir, mat_model)
-        self.loadsteps = [e for e in os.listdir(self.mat_model_path) if e != "reactions" or e != "vtk"]
 
-    def __len__(self):
-
-        return len(self.loadsteps)
-
-    def __getitem__(self, loadstep) :
-        files_path = os.path.join(self.mat_model_path, str(loadstep))
-        files = os.listdir(files_path)
-        data = dict()
-        for f in files :
-            if f.endswith(".csv") :
-                data[f"{f.split(".")[0]}"] = pd.read_csv(files_path + "/" + f)
-        output_nodes = data["output_nodes"]
-        output_elements = data["output_elements"]
-
-        coords = jnp.array(output_nodes[['x', 'y']].values)
-        disp   = jnp.array(output_nodes[['ux', 'uy']].values)
-        conn = jnp.array(output_elements[['node1', 'node2', 'node3']].values, dtype=int)
-        # Gather coords and disp for each element
-        coords_elems = coords[conn]
-        disp_elems   = disp[conn]
-
-        # Vectorize the function
-        f = jax.vmap(lambda ce, de: deformation_gradient_element(ce, de))(coords_elems, disp_elems)
-                # --- 2. create output arrays ---
-        F = jnp.tile(jnp.eye(3), (f.shape[0], 1, 1))
-
-        F = F.at[:, :2, :2].set(f)
-        B_train = B_func(F)
-        I1_train = I1_func(B_train)
-        I2_train = I2_func(B_train)
-        I3_train = I3_func(B_train)
-        invariants = jnp.stack([I1_train, I2_train, I3_train], axis=-1)
-        mm = get_material("isihara")
-        P_from_mm = mm.P(F)
-        J = J_func(F)
-
-        sigma = 1/J[:, None, None] * P_from_mm @ jnp.swapaxes(F, -2, -1)
-        # Eigenvalues
-        B_eig_val = jnp.real(jnp.linalg.eigvalsh(B_train))
-        sigma_eig_val = jnp.real(jnp.linalg.eigvalsh(sigma))
-
-        coeffs, _ = solve_for_coefficients_batched(B_eig_val, sigma_eig_val)
-        # detrended_coeffs = jnp.stack([detrend_3d_jax(invariants, coeffs[:, 0])[0], detrend_3d_jax(invariants, coeffs[:, 1])[0], detrend_3d_jax(invariants, coeffs[:, 2])[0]]).T
-        data = dict(F = F, P = P_from_mm, sigma = sigma, coeffs = coeffs, invariants = invariants)
-        return data
-        # return dict(deformation_gradient = f)
 class TractionDataset :
-    def __init__(self, data_dir: os.PathLike = "/home/mmdiscovery/shared/dataset/", mat_model: str = "NH", noise: float = 0.00):
+    def __init__(self, data_dir: os.PathLike = "/home/mmdiscovery/shared/dataset/isihara_fix"):
         self.data_dir = data_dir
-        self.noise = noise
-        self.mat_model = mat_model
-        self.mat_model_path = os.path.join(data_dir, mat_model)
-        self.files = os.listdir(self.mat_model_path)
+        self.files = os.listdir(self.data_dir)
     def __len__(self) :
         return len(self.files)
     def __getitem__(self, idx) :
-        data = np.load(os.path.join(self.mat_model_path, self.files[idx]))
+        data = np.load(os.path.join(self.data_dir, self.files[idx]))
         return data
 
         

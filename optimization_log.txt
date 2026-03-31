@@ -1,4 +1,0 @@
---- GP Hyperparameter Optimization Log ---
-
-### GP 1 (Coefficient C1) ###
-Final Objective Value (Negative MLL): 1152.846922

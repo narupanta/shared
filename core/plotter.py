@@ -26,7 +26,8 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
     # Physics Residual & Physics Noise Scale
     axs[3].plot(steps_history, loss_components_hist["phy"], color='red', label="Residual")
     ax3_twin = axs[3].twinx()
-    ax3_twin.plot(steps_history, params_hist["sigma_physic"], color='orange', linestyle='--', label=r"$\sigma_{physic}$")
+    ax3_twin.plot(steps_history, params_hist["sigma_free_x"], linestyle='--', label=r"$\sigma_free_x$")
+    ax3_twin.plot(steps_history, params_hist["sigma_free_y"], linestyle='--', label=r"$\sigma_free_y$")
     axs[3].set_title("Physics (Resid vs Noise)")
     axs[3].set_yscale('log')
     ax3_twin.set_yscale('log')
@@ -110,13 +111,16 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     fig2.savefig(os.path.join(save_path, "hyperparameters_evolution.png"))
 
     # Optional: If you want to track the physics noise parameter separately:
-    if "sigma_physic" in params_hist:
-        plt.figure(figsize=(8, 4))
-        plt.plot(steps_history, np.array(params_hist["sigma_physic"]))
-        plt.title(r"Physics Residual Noise ($\sigma_{physic}$)")
-        plt.yscale('log')
-        plt.grid(True, alpha=0.3)
-        plt.savefig(os.path.join(save_path, "physics_noise_evolution.png"))
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(steps_history, np.array(params_hist["sigma_free_x"]))
+    plt.plot(steps_history, np.array(params_hist["sigma_free_y"]))
+    plt.plot(steps_history, np.array(params_hist["sigma_fix_x"]))
+    plt.plot(steps_history, np.array(params_hist["sigma_fix_y"]))
+    plt.title(r"Physics Residual Noise ($\sigma_{physic}$)")
+    plt.yscale('log')
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(save_path, "physics_noise_evolution.png"))
 
     fig3, axes3 = plt.subplots(1, 2, figsize=(16, 6))
     fig3.suptitle("Evolution of Trend Function (Mean) Parameters", fontsize=16)
@@ -134,7 +138,7 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     axes3[0].grid(True, alpha=0.3)
 
     # Subplot 2: Volumetric Trend Parameters (k, q)
-    vol_params = ["k", "q"]
+    vol_params = ["k", "q", "s"]
     for p in vol_params:
         if p in params_hist:
             axes3[1].plot(steps_history, np.array(params_hist[p]), label=fr"${p}$")
@@ -195,12 +199,315 @@ def plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_tru
     plt.savefig(energy_plot_path)
     print(f"Energy parity plots saved to: {energy_plot_path}")
 
-def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path, step):
+# def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path, step):
+#     num_points = 50
+#     num_samples = 10 # Number of GP posterior samples to draw
+#     gamma = jnp.linspace(0.0, 1.0, num_points)
+    
+#     # Define deformation modes in a dictionary for easy iteration
+#     modes = {
+#         "Uniaxial Tension": jnp.zeros((num_points, 3, 3)),
+#         "Equibiaxial Tension": jnp.zeros((num_points, 3, 3)),
+#         "Pure Shear": jnp.zeros((num_points, 3, 3)),
+#         "Uniaxial Compression": jnp.zeros((num_points, 3, 3)),
+#         "Equibiaxial Compression": jnp.zeros((num_points, 3, 3)),
+#         "Simple Shear": jnp.zeros((num_points, 3, 3))
+#     }
+
+#     # Populate Deformation Gradients (F)
+#     modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 0, 0].set(1 + gamma)
+#     modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+
+#     modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 0, 0].set(1 + gamma)
+#     modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 1, 1].set(1 + gamma).at[:, 2, 2].set(1)
+
+#     modes["Pure Shear"] = modes["Pure Shear"].at[:, 0, 0].set(1 + gamma)
+#     modes["Pure Shear"] = modes["Pure Shear"].at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+
+#     modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 0, 0].set(1/(1 + gamma))
+#     modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+
+#     modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 0, 0].set(1/(1 + gamma))
+#     modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+
+#     modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 0].set(1).at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+#     modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 1].set(gamma) # Standard simple shear gamma
+
+#     # JIT compile the vmapped prediction function
+#     # psi_pred_func = jax.vmap(learned_gp.psi, in_axes=(0, None))
+#     psi_dist = jax.vmap(learned_gp.psi_dist)
+#     psi = jax.vmap(learned_gp.psi, in_axes = (0, None))
+
+#     # Create 2x3 grid for all modes
+#     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+#     fig.suptitle("Material Model Validation: Strain Energy Density ($\psi$) vs Standard Deformation Modes", fontsize=16)
+#     axes = axes.flatten()
+
+#     for idx, (name, F_mode) in enumerate(modes.items()):
+#         ax = axes[idx]
+        
+#         # 1. Calculate and plot True Energy
+#         psi_true = true_model.phi(F_mode)
+#         ax.plot(gamma, psi_true, label="True", color="grey", linewidth=2.5, zorder=5)
+
+#         # 2. Plot GP Samples
+#         for i in range(num_samples):
+#             # Pass a unique key for each sample
+#             psi_sample = psi(F_mode, jr.PRNGKey(i))
+#             label = "GP Samples" if i == 0 else None
+#             ax.plot(gamma, psi_sample, color="royalblue", alpha=0.1, linewidth=0.8, label=label, zorder=1)
+#         psi_mean = psi_dist(F_mode).mean
+#         psi_var = psi_dist(F_mode).var
+#         psi_std = jnp.sqrt(psi_var)
+#         lower_bound = psi_mean - 1.96 * psi_std
+#         upper_bound = psi_mean + 1.96 * psi_std
+
+#         # Plot the Mean
+
+#         # psi_mean = psi_pred_func(F_mode, None)
+#         ax.plot(gamma, psi_mean, color="navy", alpha=0.9, linewidth=2, label="GP Mean", zorder=3)
+
+#         # Plot the 95% Confidence Interval
+#         ax.fill_between(gamma, lower_bound, upper_bound, 
+#                         color="navy", alpha=0.2, label="95% CI", zorder=2)
+        
+
+#         # Formatting
+#         ax.set_title(name)
+#         ax.set_xlabel("Deformation Measure ($\gamma$)")
+#         ax.set_ylabel("Energy ($\psi$)")
+#         ax.grid(True, linestyle='--', alpha=0.5)
+#         y_min = jnp.min(jnp.array([psi_true.min(), psi_mean.min()]))
+#         y_max = jnp.max(jnp.array([psi_true.max(), psi_mean.max()]))
+
+#         # Add a 10% buffer so the lines aren't touching the edge
+#         padding = (y_max - y_min) * 0.1
+#         ax.set_ylim(y_min - padding, y_max + padding)
+#         if idx == 0: # Only show legend on first plot to avoid clutter
+#             ax.legend()
+
+#     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+#     save_file = os.path.join(save_path, f"material_modes_validation_{step}.png")
+#     plt.savefig(save_file)
+#     print(f"Loading mode validation plots saved to: {save_file}")
+
+import jax.numpy as jnp
+import jax
+import matplotlib.pyplot as plt
+import os
+
+def plot_combined_validation(learned_gp, true_model, save_path, step):
     num_points = 50
-    # num_samples = 200 # Number of GP posterior samples to draw
+    num_samples = 10
     gamma = jnp.linspace(0.0, 1.0, num_points)
     
-    # Define deformation modes in a dictionary for easy iteration
+    # --- 1. Pre-calculate Deformation Gradients (Bulk) ---
+    F_all = jnp.zeros((6, num_points, 3, 3))
+    
+    def set_F(f11, f22, f33, f12=0.0):
+        arr = jnp.zeros((num_points, 3, 3))
+        arr = arr.at[:, 0, 0].set(f11)
+        arr = arr.at[:, 1, 1].set(f22)
+        arr = arr.at[:, 2, 2].set(f33)
+        arr = arr.at[:, 0, 1].set(f12)
+        return arr
+
+    F_all = F_all.at[0].set(set_F(1 + gamma, 1.0, 1.0))            
+    F_all = F_all.at[1].set(set_F(1 + gamma, 1 + gamma, 1.0))    
+    F_all = F_all.at[2].set(set_F(1 + gamma, 1/(1 + gamma), 1.0)) 
+    F_all = F_all.at[3].set(set_F(1/(1 + gamma), 1.0, 1.0))       
+    F_all = F_all.at[4].set(set_F(1/(1 + gamma), 1/(1 + gamma), 1.0)) 
+    F_all = F_all.at[5].set(set_F(1.0, 1.0, 1.0, f12=gamma))      
+
+    mode_names = ["Uniaxial Tension", "Equibiaxial Tension", "Pure Shear", 
+                  "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
+
+    # --- 2. Vectorized Computations ---
+    # psi_dist_vmap = learned_gp.psi_dist
+    # psi_det_vmap = jax.vmap(jax.vmap(learned_gp.psi_det, in_axes=(0, None)), in_axes=(0, None))
+    psi_vmap = jax.vmap(jax.vmap(learned_gp.psi, in_axes=(0, None)),  in_axes=(0, None))
+    # piola_dist_vmap = jax.vmap(jax.vmap(learned_gp.piola_dist))
+    # piola_det_vmap = jax.vmap(jax.vmap(learned_gp.piola_det, in_axes=(0, None)), in_axes=(0, None))
+    piola_vmap = jax.vmap(jax.vmap(learned_gp.piola, in_axes=(0, None)), in_axes=(0, None))
+
+    psi_true = jax.vmap(true_model.psi)(F_all)
+    P_true = jax.vmap(jax.vmap(true_model.P))(F_all)
+    psi_dist_mean = [learned_gp.psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
+    psi_dist_var = [learned_gp.psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
+
+    P_dist_mean = [learned_gp.piola_dist(F_all[mode]).mean for mode in range(len(mode_names))]
+    P_dist_var = [learned_gp.piola_dist(F_all[mode]).var for mode in range(len(mode_names))]
+
+
+    keys = jax.random.split(jax.random.PRNGKey(step), num_samples)
+    psi_samples = jax.vmap(psi_vmap, in_axes=(None, 0))(F_all, keys)
+    psi_dets = [jax.vmap(learned_gp.psi_det)(F_all[mode]) for mode in range(len(mode_names))]
+    
+    P_samples = jax.vmap(piola_vmap, in_axes=(None, 0))(F_all, keys)
+    P_dets = [jax.vmap(learned_gp.piola_det)(F_all[mode]) for mode in range(len(mode_names))]
+
+    # --- 3. Plotting ---
+    fig, axes = plt.subplots(6, 2, figsize=(12, 24))
+    fig.suptitle(f"Material Discovery Validation - Step {step}", fontsize=20, y=1.01)
+
+    for i, name in enumerate(mode_names):
+        if name == "Pure Shear":
+            idx_comp = (1, 1); label_P = r"$P_{22}$"
+        elif name == "Simple Shear":
+            idx_comp = (0, 1); label_P = r"$P_{12}$"
+        else:
+            idx_comp = (0, 0); label_P = r"$P_{11}$"
+
+        # Column 0: Energy
+        ax_psi = axes[i, 0]
+        ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.2, label="True", zorder=5)
+        # plot energy prediction (deterministic)
+        ax_psi.plot(gamma, psi_dets[i], color = "red", lw = 0.8, alpha = 0.3, zorder = 1)
+        ax_psi.plot(gamma, psi_samples[:, i, :].T, color="lightblue", lw=0.8, alpha=0.3, zorder=1)
+        ax_psi.plot(gamma, psi_dist_mean[i], color="blue", lw=2, label="GP Mean", zorder=3)
+        ax_psi.fill_between(gamma, psi_dist_mean[i] - 1.96*jnp.sqrt(psi_dist_var[i]), 
+                           psi_dist_mean[i] + 1.96*jnp.sqrt(psi_dist_var[i]), color="blue", alpha=0.1, zorder=2)
+        
+        # Limit Energy plot to True model range
+        y_min, y_max = jnp.min(psi_true[i]), jnp.max(psi_true[i])
+        pad = (y_max - y_min) * 0.1
+        ax_psi.set_ylim(y_min - pad, y_max + pad)
+        ax_psi.set_xlim(0, 1)
+
+        # Column 1: Stress
+        ax_p = axes[i, 1]
+        p_true_comp = P_true[i, :, idx_comp[0], idx_comp[1]]
+        p_mean_comp = P_dist_mean[i][:, idx_comp[0], idx_comp[1]]
+        p_std_comp = jnp.sqrt(P_dist_var[i][:, idx_comp[0], idx_comp[1]])
+        p_samples_comp = P_samples[:, i, :, idx_comp[0], idx_comp[1]]
+        p_det_comp = P_dets[i][:, idx_comp[0], idx_comp[1]]
+
+        ax_p.plot(gamma, p_true_comp, 'k--', lw=1.2, label="True", zorder=5)
+        ax_p.plot(gamma, p_det_comp, color = "red", lw = 0.8, alpha = 0.3, zorder = 1)
+
+        ax_p.plot(gamma, p_samples_comp.T, color="lightblue", lw=0.8, alpha=0.3, zorder=1)
+        ax_p.plot(gamma, p_mean_comp, color="blue", lw=2, label="GP Mean", zorder=3)
+        ax_p.fill_between(gamma, p_mean_comp - 1.96*p_std_comp, 
+                         p_mean_comp + 1.96*p_std_comp, color="blue", alpha=0.1, zorder=2)
+
+        # Limit Stress plot to True model range
+        y_min_p, y_max_p = jnp.min(p_true_comp), jnp.max(p_true_comp)
+        pad_p = (y_max_p - y_min_p) * 0.1 if y_max_p != y_min_p else 1.0
+        ax_p.set_ylim(y_min_p - pad_p, y_max_p + pad_p)
+        ax_p.set_xlim(0, 1)
+
+        # Formatting
+        ax_psi.set_title(f"{name}: Energy")
+        ax_p.set_title(f"{name}: Stress")
+        for ax in [ax_psi, ax_p]:
+            ax.set_xlabel(r"$\gamma$")
+            ax.grid(True, alpha=0.2)
+            if i == 0: ax.legend()
+
+    plt.tight_layout()
+    save_file = os.path.join(save_path, f"clamped_validation_{step}.png")
+    plt.savefig(save_file, bbox_inches='tight')
+    plt.close()
+    print(f"Clamped limits plot saved to: {save_file}")
+
+def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path, step):
+    num_points = 50
+    num_samples = 10 
+    gamma = jnp.linspace(0.0, 1.0, num_points)
+    
+    # 1. Pre-calculate all deformation gradients in a single array for bulk processing
+    # Shape: (6 modes, num_points, 3, 3)
+    F_all = jnp.zeros((6, num_points, 3, 3))
+    
+    # Helper to fill modes efficiently
+    def set_F(idx, f11, f22, f33, f12=0.0):
+        # We broadcast the scalar values or arrays to the num_points dimension
+        arr = jnp.zeros((num_points, 3, 3))
+        arr = arr.at[:, 0, 0].set(f11)
+        arr = arr.at[:, 1, 1].set(f22)
+        arr = arr.at[:, 2, 2].set(f33)
+        arr = arr.at[:, 0, 1].set(f12)
+        return arr
+
+    F_all = F_all.at[0].set(set_F(0, 1 + gamma, 1.0, 1.0))            # Uniaxial Tension
+    F_all = F_all.at[1].set(set_F(1, 1 + gamma, 1 + gamma, 1.0))    # Equibiaxial Tension
+    F_all = F_all.at[2].set(set_F(2, 1 + gamma, 1/(1 + gamma), 1.0)) # Pure Shear
+    F_all = F_all.at[3].set(set_F(3, 1/(1 + gamma), 1.0, 1.0))       # Uniaxial Compression
+    F_all = F_all.at[4].set(set_F(4, 1/(1 + gamma), 1/(1 + gamma), 1.0)) # Equibiaxial Compression
+    F_all = F_all.at[5].set(set_F(5, 1.0, 1.0, 1.0, f12=gamma))      # Simple Shear
+
+    mode_names = ["Uniaxial Tension", "Equibiaxial Tension", "Pure Shear", 
+                  "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
+
+    # 2. Vectorize the GP calls
+    # Vectorize across the points (axis 0) AND the modes (new axis)
+    psi_dist_vmap = jax.vmap(jax.vmap(learned_gp.psi_dist))
+    
+    # Vectorize sample generation: (samples, modes, points)
+    # We vmap over keys and then over the double-vmapped psi function
+    sample_keys = jax.random.split(jax.random.PRNGKey(0), num_samples)
+    psi_sample_vmap = jax.vmap(jax.vmap(jax.vmap(learned_gp.psi, in_axes=(0, None)), in_axes=(0, None)), in_axes=(None, 0))
+
+    # 3. Compute everything in bulk (The heavy lifting)
+    # psi_true: (6, num_points)
+    psi_true_all = jax.vmap(true_model.phi)(F_all)
+    
+    # stats: (6, num_points)
+    dist = psi_dist_vmap(F_all)
+    psi_mean_all = dist.mean
+    psi_std_all = jnp.sqrt(dist.var)
+    
+    # samples: (num_samples, 6, num_points)
+    psi_samples_all = psi_sample_vmap(F_all, sample_keys)
+
+    # 4. Plotting
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle("Material Model Validation: Strain Energy Density ($\psi$) vs Standard Deformation Modes", fontsize=16)
+    axes = axes.flatten()
+
+    for idx, name in enumerate(mode_names):
+        ax = axes[idx]
+        
+        # 1. Plot True Energy (Dashed and thinner as requested)
+        ax.plot(gamma, psi_true_all[idx], label="True", color="black", 
+                linestyle='--', linewidth=1.5, zorder=5)
+
+        # 2. Plot GP Samples (From pre-computed bulk array)
+        ax.plot(gamma, psi_samples_all[:, idx, :].T, color="lightblue", 
+                alpha=0.1, linewidth=0.8, zorder=1)
+        
+        # 3. Plot Mean and CI
+        lower_bound = psi_mean_all[idx] - 1.96 * psi_std_all[idx]
+        upper_bound = psi_mean_all[idx] + 1.96 * psi_std_all[idx]
+
+        ax.plot(gamma, psi_mean_all[idx], color="blue", alpha=0.9, linewidth=2, label="GP Mean", zorder=3)
+        ax.fill_between(gamma, lower_bound, upper_bound, color="blue", alpha=0.2, label="95% CI", zorder=2)
+
+        # Formatting
+        ax.set_title(name)
+        ax.set_xlabel("Deformation Measure ($\gamma$)")
+        ax.set_ylabel("Energy ($\psi$)")
+        ax.grid(True, linestyle='--', alpha=0.5)
+        
+        # Buffering
+        y_min, y_max = psi_true_all[idx].min(), psi_true_all[idx].max()
+        padding = (y_max - y_min) * 0.15
+        ax.set_ylim(y_min - padding, y_max + padding)
+        
+        if idx == 0:
+            ax.legend()
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    save_file = os.path.join(save_path, f"material_modes_validation_{step}.png")
+    plt.savefig(save_file)
+    print(f"Loading mode validation plots saved to: {save_file}")
+
+def plot_stress_validation(gp_model, true_model, save_path):
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle("Piola Stress Validation: Model Discovery vs. True Physics", fontsize=16)
+    axes = axes.flatten()
+    num_points = 100
+    gamma = jnp.linspace(0.0, 1.0, num_points)
     modes = {
         "Uniaxial Tension": jnp.zeros((num_points, 3, 3)),
         "Equibiaxial Tension": jnp.zeros((num_points, 3, 3)),
@@ -228,72 +535,57 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path, step):
 
     modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 0].set(1).at[:, 1, 1].set(1).at[:, 2, 2].set(1)
     modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 1].set(gamma) # Standard simple shear gamma
-
-    # JIT compile the vmapped prediction function
-    # psi_pred_func = jax.vmap(learned_gp.psi, in_axes=(0, None))
-    psi_dist = jax.vmap(learned_gp.psi_dist)
-    # psi_mean = psi_dist.mean
-    # psi_var = psi_dist.var
-
-    # psi_var_func =  jax.jit(jax.vmap(lambda f: learned_gp.psi(f).var))
-    # psi_pred_sample = jax.jit(jax.vmap(learned_gp.psi_sample, in_axes=(0, None)))
-
-    # Create 2x3 grid for all modes
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle("Material Model Validation: Strain Energy Density ($\psi$) vs Standard Deformation Modes", fontsize=16)
-    axes = axes.flatten()
-
-    for idx, (name, F_mode) in enumerate(modes.items()):
-        ax = axes[idx]
+    
+    for i, (mode_name, F_stack) in enumerate(modes.items()):
+        # num_samples = 10
+        # keys = jax.random.split(jax.random.PRNGKey(42), num_samples)
+        # 1. Compute Piola Stress for the whole stack
+        # Piola_stress function uses jax.grad(psi)
+        # P_predicted = jax.vmap(lambda f: gp_model.piola(f, None))(F_stack)
+        # P_predicted = jnp.array(P_predicted)
+        P_mean = jax.vmap(lambda f: gp_model.piola_dist(f).mean)(F_stack)
+        P_var = jax.vmap(lambda f: gp_model.piola_dist(f).var)(F_stack)
+        P_std = jnp.sqrt(P_var)
+        P_lower_bound = P_mean - 1.96 * P_std
+        P_upper_bound = P_mean + 1.96 * P_std
         
-        # 1. Calculate and plot True Energy
-        psi_true = true_model.phi(F_mode)
-        ax.plot(gamma, psi_true, label="True", color="grey", linewidth=2.5, zorder=5)
+        P_true = jax.vmap(true_model.P)(F_stack)
+        # 2. Select the relevant component based on the mode
+        if mode_name == "Pure Shear":
+            y_pred = P_mean[:, 1, 1] # P22
+            y_true = P_true[:, 1, 1]
+            lower = P_lower_bound[:, 1, 1]
+            upper = P_upper_bound[:, 1, 1]
+            label = r"$P_{22}$"
+        elif mode_name == "Simple Shear":
+            y_pred = P_mean[:, 0, 1] # P12
+            y_true = P_true[:, 0, 1]
+            lower = P_lower_bound[:, 0, 1]
+            upper = P_upper_bound[:, 0, 1]
+            label = r"$P_{12}$"
+        else:
+            y_pred = P_mean[:, 0, 0] # P11
+            y_true = P_true[:, 0, 0]
+            lower = P_lower_bound[:, 0, 0]
+            upper = P_upper_bound[:, 0, 0]
+            label = r"$P_{11}$"
 
-        # 2. Plot GP Samples
-        # for i in range(num_samples):
-        #     # Pass a unique key for each sample
-        #     psi_sample = psi_pred_func(F_mode, jr.PRNGKey(i))
-        #     label = "GP Samples" if i == 0 else None
-        #     ax.plot(gamma, psi_sample, color="royalblue", alpha=0.1, linewidth=0.8, label=label, zorder=1)
-        psi_mean = psi_dist(F_mode).mean
-        psi_var = psi_dist(F_mode).var
-        psi_std = jnp.sqrt(psi_var)
-        lower_bound = psi_mean - 1.96 * psi_std
-        upper_bound = psi_mean + 1.96 * psi_std
-
-        # Plot the Mean
-
-        # psi_mean = psi_pred_func(F_mode, None)
-        ax.plot(gamma, psi_mean, color="navy", alpha=0.9, linewidth=2, label="GP Mean", zorder=3)
-
-        # Plot the 95% Confidence Interval
-        ax.fill_between(gamma, lower_bound, upper_bound, 
-                        color="navy", alpha=0.2, label="95% CI", zorder=2)
+        # 3. Plotting
+        gamma = jnp.linspace(0, 1, len(F_stack)) # Match your gamma range
+        axes[i].plot(gamma, y_pred, color='blue', label='GP Predicted')
+        axes[i].fill_between(gamma, lower, upper, color='blue', alpha=0.2, label='95% CI')
+        # Assuming you have ground truth stress 'y_true'
+        axes[i].plot(gamma, y_true, 'k--', alpha=0.6, label='True')
         
-
-        # Formatting
-        ax.set_title(name)
-        ax.set_xlabel("Deformation Measure ($\gamma$)")
-        ax.set_ylabel("Energy ($\psi$)")
-        ax.grid(True, linestyle='--', alpha=0.5)
-        y_min = jnp.min(jnp.array([psi_true.min(), psi_mean.min()]))
-        y_max = jnp.max(jnp.array([psi_true.max(), psi_mean.max()]))
-
-        # Add a 10% buffer so the lines aren't touching the edge
-        padding = (y_max - y_min) * 0.1
-        ax.set_ylim(y_min - padding, y_max + padding)
-        if idx == 0: # Only show legend on first plot to avoid clutter
-            ax.legend()
+        axes[i].set_title(mode_name)
+        axes[i].set_ylabel(label)
+        axes[i].set_xlabel(r"$\gamma$")
+        axes[i].grid(True, alpha=0.3)
+        axes[i].legend()
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    
-    # Save the combined validation figure
-    save_file = os.path.join(save_path, f"material_modes_validation_{step}.png")
-    plt.savefig(save_file)
-    print(f"Loading mode validation plots saved to: {save_file}")
+    plt.savefig(os.path.join(save_path, "piola_stress_validation.png"))
 
-    
 def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
     # Setup Figure 1: Inducing points in Feature Space
     fig1, axes1 = plt.subplots(1, 2, figsize=(14, 6))
@@ -476,3 +768,9 @@ def plot_stress_validation(gp_model, true_model, save_path):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(os.path.join(save_path, "piola_stress_validation.png"))
+
+def plot_deterministic_against_true() :
+    raise NotImplementedError
+
+def plot_noise_model_verification(gp_model, data, save_path) :
+    pass

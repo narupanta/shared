@@ -86,7 +86,7 @@ if __name__ == "__main__" :
         coords = data["mesh_pos"][:,:2]
         cells = data["cells"]
         # u = data["u"]
-        u_percent_noise = 0.000
+        u_percent_noise = 0.00001
         node_type = data["node_type"]
         ux = data["u"][:, 0]
         # ux[(data["node_type"] != 1)] += np.random.normal(0, percent_noise * 1, ux.shape)[(data["node_type"] != 1)]
@@ -109,7 +109,7 @@ if __name__ == "__main__" :
         F_all.append(F)
         reactions.append(reaction)
     
-    model_path = "/home/mmdiscovery/shared/saved_model/20260212T151813/" # Replace with the actual path to your saved model
+    model_path = "/home/mmdiscovery/shared/selected_model/20260209T135936/" # Replace with the actual path to your saved model
 
     with open(os.path.join(model_path, "best_params.npy"), "rb") as f:
         best_params = jnp.load(f, allow_pickle=True).item()
@@ -120,7 +120,7 @@ if __name__ == "__main__" :
         I_obs_all = jnp.load(f)
     u_array = jnp.array(u_all)
     loads = jnp.array(loads)
-    load_noise = 0.01
+    load_noise = 0.03
     # check = jnp.mean(loads, axis = 0)
     load_array = loads + np.random.normal(0, load_noise * (jnp.max(loads) + jnp.min(loads)), loads.shape)
     reaction_array = jnp.array(reactions)
@@ -132,7 +132,7 @@ if __name__ == "__main__" :
     min_vol = calculate_min_ls(vol_z)
     learned_gp = SparseHyperelasticityGP(best_raw_params, I_z, min_dev, min_vol) 
     main_key = jr.PRNGKey(42)
-    n_samples = 1000
+    n_samples = 50
     R_nodes_samples = []
     vmapped_force_residual = jax.vmap(force_residual_force_controlled, in_axes=(0, 0, 0, None, None, None, None))
     for i in range(n_samples) :
@@ -153,14 +153,10 @@ if __name__ == "__main__" :
     free_nodes_on_dc1 = free_nodes_on_dc1.flatten()
     free_nodes_on_dc2 = free_nodes_on_dc2.flatten()
     free_nodes = jnp.concat([free_nodes_flat1, free_nodes_on_dc1, free_nodes_on_dc2], axis=0)
-    neumann_nodes = (node_type[:, 3] == 1) | (node_type[:, 4] == 1)
-    free_R_nodes_on_neumann = R_nodes_array[:, :, neumann_nodes, :]
-    free_R_nodes_on_neumann = free_R_nodes_on_neumann.flatten()
-    # one_free_node = free_R_nodes[:, :, 250, :].flatten()
+    # one_free_node = free_R_nodes[:, :, 100, :].flatten()
     # 1. Flatten your free residuals to a 1D array
     # residual_free: (#free_dofs, 1) -> (#free_dofs,)
-    data_free = free_R_nodes_on_neumann
-    # data_free = one_free_node
+    data_free = free_nodes
     fix_nodes_dc1 = (node_type[:, 1] == 1)
     fix_nodes_dc2 = (node_type[:, 2] == 1)
     fix_R_nodes_dc1 = R_nodes_array[:, :, fix_nodes_dc1, 0]
@@ -191,7 +187,7 @@ if __name__ == "__main__" :
     plt.figure(figsize=(8, 5))
 
     # Plot empirical density (Density=True scales the area to 1)
-    plt.hist(data_free, bins=100, density=True, alpha=0.6, color='skyblue', label='Empirical Residuals')
+    plt.hist(data_free, bins=500, density=True, alpha=0.6, color='skyblue', label='Empirical Residuals')
 
     # Plot learned Normal distribution
     plt.plot(x_axis, theoretical_pdf, 'r-', lw=2, label=f'Model N(0, σ={learned_gp.params.sigma_phys:.2e})')

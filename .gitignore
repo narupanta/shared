@@ -3,6 +3,11 @@
 /.vscode
 /.devcontainer
 /saved_model
+/selected_model
+/saved_analysis
 *.msh
 *.png
 *.pdf
+/coverage_test
+/analysis
+/precomputed_vfm

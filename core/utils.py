@@ -110,25 +110,18 @@ def generate_random_F_plane_stress(n_samples, lambda_range=(0.5, 2.5), seed=None
 
 from jax import vmap
 
-def sum_negative_conjugate_mll(posteriors, datasets):
-    """
-    Computes the Sum Negative Marginal Log-Likelihood (Sum MLL) 
-    across a tuple of independent GPs and their datasets.
-    """
-    # Vectorize the individual negative MLL function across the list/tuple of models and datasets
-    all_mlls = vmap(
-        lambda p, d: -gpx.objectives.conjugate_mll(p, d), 
-        in_axes=(0, 0) # Map along the first axis of both the posteriors (p) and datasets (d)
-    )(posteriors, datasets)
-    
-    # Sum the result
-    return jnp.sum(all_mlls)
-
 def fto3x3(f) :
     f3x3 = jnp.array([[f[0,0], f[0,1], 0.0],
                       [f[1,0], f[1,1], 0.0],
                       [0.0, 0.0, 1.0]])
     return f3x3
+
+# def fto3x3(f):
+#     # Initialize a 3x3 Identity matrix (ensures F33 = 1.0 and others are 0.0)
+#     f3x3 = jnp.eye(3)
+#     # Use JAX's functional update to place the 2x2 F into the 3x3
+#     f3x3 = f3x3.at[:2, :2].set(f)
+#     return f3x3
 
 @jax.vmap
 def transformation_jacobian(coords_elem) :
@@ -195,8 +188,8 @@ def calculate_min_ls(z):
     avg_dist = jnp.mean(distances[:, 1])
     return avg_dist * 0.5 # Minimum allowable lengthscale
 
-def invariants_and_derivatives(F):
-    f = fto3x3(F)
+def invariants_and_derivatives(f):
+    # Calculate invariants
     C = f.T @ f
     I1 = jnp.trace(C)
     I2 = 0.5 * (I1**2 - jnp.trace(C @ C))
@@ -250,7 +243,47 @@ def transform_input_features(invariants) :
     i1_dev = i3**(-1/3)*invariants[0]
     i2_dev = i3**(-2/3)*invariants[1]
     dev_feature = jnp.stack([i1_dev, i2_dev], axis = -1)
-    # vol_feature = jnp.stack([j, -2 * j], axis = -1)
     vol_feature = jnp.array([j])
 
     return dev_feature, vol_feature
+
+def farthest_point_sampling_with_fixed_point(pts, num_samples, fixed_point):
+    """
+    pts: (N, 2) array of 2D points
+    num_samples: Total points to return (including the fixed point)
+    fixed_point: jnp.array([3.0, 3.0])
+    """
+    # 1. Add the fixed point [3,3] to the very start of the array
+    # This guarantees it exists in the data we are sampling from
+    pts_augmented = jnp.concatenate([fixed_point[None, :], pts], axis=0)
+    
+    # 2. The index of [3,3] is now 0
+    first_idx = 0
+    
+    # 3. Initialize distance to set based on the fixed point [3,3]
+    initial_dist_to_set = jnp.sum((pts_augmented - pts_augmented[first_idx])**2, axis=-1)
+    
+    def scan_body(dist_to_set, _):
+        # Pick point farthest from the current set (initially just [3,3])
+        idx = jnp.argmax(dist_to_set)
+        
+        new_pt = pts_augmented[idx]
+        dists_to_new_pt = jnp.sum((pts_augmented - new_pt)**2, axis=-1)
+        
+        # Update distances: nearest distance to the set
+        new_dist_to_set = jnp.minimum(dist_to_set, dists_to_new_pt)
+        
+        return new_dist_to_set, idx
+
+    # 4. Run the loop for the remaining points
+    _, remaining_indices = jax.lax.scan(
+        scan_body, 
+        initial_dist_to_set, 
+        None, 
+        length=num_samples - 1
+    )
+    
+    sampled_indices = jnp.concatenate([jnp.array([first_idx]), remaining_indices])
+    
+    # Return the coordinates of the sampled points
+    return pts_augmented[sampled_indices]

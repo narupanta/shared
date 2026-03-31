@@ -42,7 +42,7 @@ class BaseMaterialModel(ABC):
         self._batched_grad = None
 
     @abstractmethod
-    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         """
         Strain energy for a single sample F (shape (3,3)) or for batched F (...,3,3).
         Must return a scalar (0-d array) per sample (or an array with leading batch dims).
@@ -61,7 +61,7 @@ class BaseMaterialModel(ABC):
         # per-sample scalar phi function: ensures a scalar for a single (3,3) input
         def per_sample_phi(F_single: jnp.ndarray) -> jnp.ndarray:
             # ensure phi returns a scalar; if phi returns non-scalar, sum it
-            out = self.phi(F_single)
+            out = self.psi(F_single)
             return jnp.sum(out)
 
         # gradient of scalar w.r.t. F (returns same shape as F_single)
@@ -114,12 +114,12 @@ class BaseMaterialModel(ABC):
 
 @register_material("mooney-rivlin")
 class MooneyRivlin(BaseMaterialModel):
-    def __init__(self, c01 = 1.0, c02 = 1.0, c10 = 1.0, c11 = 1.0, c12 = 1.0, c20 = 1.0, c21 = 1.0, c22 = 1.0, d0 = 1.0, d1 = 1.0, jit_P: bool = True):
+    def __init__(self, dev_params, vol_params, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
-        self.dev_params = [c01, c02, c10, c11, c12, c20, c21, c22]
-        self.vol_params = [d0, d1]
+        self.dev_params = dev_params
+        self.vol_params = vol_params
 
-    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         if F.shape[-2:] == (2, 2):
             F = jnp.array([[F[0, 0], F[0, 1], 0.], 
                         [F[1, 0], F[1, 1], 0.],
@@ -183,14 +183,10 @@ class MooneyRivlin(BaseMaterialModel):
 class NeoHookean(BaseMaterialModel):
     def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
-        # E = 70.e3
-        # nu = 0.3
-        # mu = E/(2.*(1. + nu))
-        # kappa = E/(3.*(1. - 2.*nu))
         self.c1 = c1
         self.c2 = c2
 
-    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         B = B_func(F)
         I1 = I1_func(B)
         I3 = I3_func(B)
@@ -206,7 +202,7 @@ class Isihara(BaseMaterialModel):
         self.c1 = c1
         self.c2 = c2
 
-    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         C = C_func(F)
         I1 = I1_func(C)
         I2 = I2_func(C)
@@ -225,7 +221,7 @@ class GentThomas(BaseMaterialModel):
         self.c1 = c1
         self.c2 = c2
 
-    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         C = C_func(F)
         I1 = I1_func(C)
         I2 = I2_func(C)
@@ -236,32 +232,14 @@ class GentThomas(BaseMaterialModel):
         term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2 + term3
 
-@register_material("gentthomas")
-class GentThomas(BaseMaterialModel):
-    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
-        super().__init__(jit_P=jit_P)
-        self.c1 = c1
-        self.c2 = c2
-
-    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
-        C = C_func(F)
-        I1 = I1_func(C)
-        I2 = I2_func(C)
-        I3 = I3_func(C) 
-        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
-        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
-        term2 = jnp.log(I3_safe**(-2/3) * I2 / 3)
-        term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
-        return term1 + term2 + term3
-
 @register_material("neohookean4")
-class GentThomas(BaseMaterialModel):
+class NeoHookean4(BaseMaterialModel):
     def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
         self.c1 = c1
         self.c2 = c2
 
-    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         C = C_func(F)
         I1 = I1_func(C)
         I2 = I2_func(C)
@@ -272,13 +250,13 @@ class GentThomas(BaseMaterialModel):
         return term1 + term3
     
 @register_material("haineswilson")
-class GentThomas(BaseMaterialModel):
+class HainesWilson(BaseMaterialModel):
     def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
         self.c1 = c1
         self.c2 = c2
 
-    def phi(self, F: jnp.ndarray) -> jnp.ndarray:
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         C = C_func(F)
         I1 = I1_func(C)
         I2 = I2_func(C)
@@ -291,20 +269,3 @@ class GentThomas(BaseMaterialModel):
         term5 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2 + term3 + term4 + term5
 
-
-# ------------------------------
-# Example small tests / usage
-# ------------------------------
-if __name__ == "__main__":
-    # create a small deformation gradient (single)
-    F_single = jnp.array([[1.1, 0.1, 0.0],
-                          [0.0, 1.05, 0.0],
-                          [0.0, 0.0, 0.98]])
-    mm = get_material("neo-hookean", c1=1.0, c2=1.5)
-    P_single = mm.P(F_single)  # shape (3,3)
-    print("P_single:", P_single)
-
-    # batched F (N,3,3)
-    F_batch = jnp.stack([F_single, F_single * 1.01], axis=0)  # (2,3,3)
-    P_batch = mm.P(F_batch)  # (2,3,3)
-    print("P_batch shape:", P_batch.shape)

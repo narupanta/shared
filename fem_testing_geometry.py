@@ -230,8 +230,13 @@ if __name__ == "__main__" :
     min_vol = calculate_min_ls(vol_z)
 
     learned_gp = SparseHyperelasticityGP(best_raw_params, I_z, min_dev, min_vol)
-
-    pred_piola_stress_func = lambda f: learned_gp.piola(fto3x3(f), key = None)[:2, :2]
+    n_piola_sample = 5
+    pred_piola_stress_funcs = []
+    main_key = jr.PRNGKey(456)
+    piola_keys = jr.split(main_key, n_piola_sample)
+    for key in piola_keys :
+        pred_piola_stress_func = lambda f: learned_gp.piola(fto3x3(f), key)[:2, :2]
+        pred_piola_stress_funcs.append(pred_piola_stress_func)
 
     # # Create an instance of the problem.
     problem_true = HyperElasticity(mesh = mesh,
