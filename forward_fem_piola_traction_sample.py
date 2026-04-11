@@ -27,7 +27,7 @@ import matplotlib.tri as tri
 import numpy as np
 import matplotlib.pyplot as plt
 import numpy as np
-
+import argparse
 from sklearn.metrics import r2_score
 
 plt.rcParams.update({
@@ -193,18 +193,31 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, save_pa
     plt.savefig(os.path.join(save_path, "displacement_analysis.png"), dpi=300, bbox_inches='tight')
 # Usage:
 # plot_force_fields(node_coords, cells, R_nodes)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
 
+    # Dataset & Model Config
+    parser.add_argument('--model_path', type=str, default="20260411T115941_isihara_0.0_0.01_8_0.975_5_40.0_1_0")
+    # parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[2, 4, 6, 8])
+    parser.add_argument('--n_sample', type=int, default=128)
+
+
+    return parser.parse_args()
 if __name__ == "__main__" :
-    material_model_name = "isihara"
-    disp_noise = 0.0
-    load_noise = 0.005
-    train_load_step_indices = [0, 5, 9]
-    validation_load_step_indices = [2, 4, 6, 8]
-
+    args = parse_args()
+    # validation_load_step_indices = args.validation_load_step_indices
+    n_sample = args.n_sample
     # load result 
     analysis_dir = Path("coverage_test") 
-    extraction_result_dir = Path("selected_model") 
-    case_name = f"{material_model_name}_{disp_noise}_{load_noise}"
+    extraction_result_dir = Path("saved_model") 
+    # case_name = f"20260410T172507_isihara_0.0_0.01_8_0.975_5_40_0_0"
+    case_name = args.model_path
+    dataset_params = case_name.split("_")
+    material_model_name = dataset_params[1]
+    asym_factor = float(dataset_params[5])
+    target_load = float(dataset_params[4])
+    load_noise = float(dataset_params[3])
+
     save_path = analysis_dir / case_name
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
@@ -239,7 +252,7 @@ if __name__ == "__main__" :
             return first_PK_stress
         
     # Specify mesh-related information (first-order hexahedron element).
-    mesh_data = jnp.load("/home/mmdiscovery/shared/mesh/mesh.npz")
+    mesh_data = jnp.load("mesh/mesh.npz")
     node_coords = mesh_data["node_coords"][:, :2]
     cells = mesh_data["cells"]
     ele_type = 'TRI3'
@@ -286,6 +299,7 @@ if __name__ == "__main__" :
     best_raw_params = GPRawParams(**best_raw_params)
     model = SparseHyperelasticityGP(best_raw_params, I_z, min_dev, min_vol, max_dev, max_vol)
     model.params = model.load_params(best_raw_params)
+    
     model.gpweight = model.precompute_weights(best_raw_params)
     
     
@@ -311,42 +325,22 @@ if __name__ == "__main__" :
         "ksp_rtol": 1e-5,  # Force higher accuracy in the linear solve
         "ksp_atol": 1e-8,
     }
-    key = jax.random.PRNGKey(102)
-    asym_factor = 0.95
-    num_samples = 1024
-    num_steps = 10
-    target_top_load = 10.0
-    target_right_load = asym_factor * target_top_load
-    target_load = jnp.array([target_right_load, target_top_load])
+    key = jax.random.PRNGKey(42)
 
-    # load_noise = 0.01 # Assuming a value for load_noise
-    noise_std = load_noise * target_load
+    # 2. Calculate Noise Scale (1% of average load)
+    # We take the mean of all non-zero load magnitudes to define the noise floor
 
-    # 1. Generate keys for each sample
-    # keys = jax.random.split(key, num_samples)
+    # avg_load = jnp.mean(jnp.abs(loads_base)) 
+    # noise_std = load_noise * avg_load
+    # loads_noisy = loads_base + noise_std * jax.random.normal(key, shape=(num_steps, 2))
 
-    # 2. Generate noisy target loads for ALL samples at once: shape (1024, 1)
-    # We add the noise to the base target_load
-    target_loads_noisy = target_load + noise_std * jax.random.normal(key, (num_samples, 2))
-
-    # 3. Create the linear ramp for all samples via broadcasting
-    # ramp shape: (10,)
-    ramp = jnp.linspace(0.0, 1.0, num_steps)
+    # We want a final shape of (128, 10, 2)
+    # We broadcast the (10, 2) base across 128 samples and add noise
+    # noise = jax.random.normal(key, shape=(num_load_samples, num_steps, 2)) * noise_std
+    # loads_noisy = jnp.expand_dims(loads_base, axis=0) + noise
     
-
-    # noisy_load_top shape: (1024, 10)
-    # (1024, 1) * (10,) -> (1024, 10)
-    noisy_load_top = target_loads_noisy[:, 1][:, None] * ramp[None, :]
-    noisy_load_right = target_loads_noisy[:, 0][:, None] * ramp[None, :]
-
-    # 4. Apply asymmetry and stack
-    # noisy_load_right = noisy_load_top * asym_factor
-
-    # Final stack on a new axis to get (1024, 10, 2)
-    loads_noisy = jnp.stack([noisy_load_right, noisy_load_top], axis=-1)
-
-    print(loads_noisy.shape)
-
+    # loads_right = loads_top * asym_factor
+    # loads = jnp.stack([loads_right, loads_top], axis=1)
     # Solve the defined problem.
 
     # u_true = jnp.zeros_like(node_coords)
@@ -373,59 +367,60 @@ if __name__ == "__main__" :
             u_list.append(u)
         u_array = jnp.stack(u_list, axis=0)  
         return u_array
+    
+    num_steps = 10
+    # loads_top = jnp.linspace(0.0, 10, 10)
+    noise_std = load_noise * target_load
+    target_load_noisy = target_load + noise_std * jax.random.normal(key)
+
+    # noisy_target_loads = 
+    noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1,1)
+    noisy_load_right_base = noisy_load_top_base * asym_factor
+    # Baseline loads shape: (10, 2)
+    loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
+
+    u_true = solve_fem(problem_true, petsc_options, loads_noisy)
+    u_pred_samples = []
+
+
 
     # pred_piola_stress_funcs = []
-    # main_key = jr.PRNGKey(102)
+    main_key = jr.PRNGKey(128)
     # piola_keys = jr.split(main_key, n_piola_sample)
     # for key in piola_keys :
     #     pred_piola_stress_func = lambda f: model.piola(fto3x3(f), key)[:2, :2]
     #     pred_piola_stress_funcs.append(pred_piola_stress_func)
-    u_true_force_samples = [] 
-    for i in range(loads_noisy.shape[0]) :
-        load = loads_noisy[i]
-        # main_key, subkey = jr.split(main_key)
-        # u_pred = jnp.zeros_like(node_coords)
-        u_true_s = solve_fem(problem_true, petsc_options, load)
 
-        u_true_force_samples.append(u_true_s)
-        # incrementally save u_pred_samples in .npz file alongside cells, coords, node_type
-        if not os.path.exists(os.path.join(save_path, "force_samples")):
-            os.makedirs(os.path.join(save_path, "force_samples"))
-        np.savez_compressed(os.path.join(save_path, f"force_samples/u_true_s{i}.npz"), u=u_true_s, cells=cells, node_coords=node_coords, node_type=node_type)
-    # u_pred_sample_array = jnp.array(u_pred_samples)[:, -1, :, :]
+    for i in range(n_sample) :
+        main_key, key_traction, key_piola= jr.split(main_key, 3)
+        # key_traction = subkey[0]
+        # key_piola = subkey[1]
+        # num_load_samples = 32
+        num_steps = 10
+        # loads_top = jnp.linspace(0.0, 10, 10)
+        target_load = 10.0
+        noise_std = load_noise * target_load
+        target_load_noisy = target_load + noise_std * jax.random.normal(key_traction)
 
-    # u_pred_mean = u_pred_sample_array.mean(axis=0)
-    # u_pred_std = u_pred_sample_array.std(axis=0)
+        # noisy_target_loads = 
+        noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1,1)
+        noisy_load_right_base = noisy_load_top_base * asym_factor
+        # Baseline loads shape: (10, 2)
+        loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
+        problem_pred = HyperElasticity(mesh = mesh,
+                                vec=2,
+                                dim=2,
+                                ele_type=ele_type,
+                                dirichlet_bc_info=dirichlet_bc_info,
+                                location_fns = [right,top],
+                                material_model_piola_stress=lambda f: model.piola(fto3x3(f), key_piola)[:2, :2])
+        
+        u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
+        u_pred_samples.append(u_pred)
+        if not os.path.exists(os.path.join(save_path, "piola_traction_samples")):
+            os.makedirs(os.path.join(save_path, "piola_traction_samples"))
+        np.savez_compressed(os.path.join(save_path, f"piola_traction_samples/u_pred_ps{i}.npz"), u_pred=u_pred, cells=cells, node_coords=node_coords, node_type=node_type)
+    u_pred_sample_array = jnp.array(u_pred_samples)[:, -1, :, :]
 
-    # plot_disp_field(node_coords, cells, u_true[-1], u_pred_mean, u_pred_std, save_path)
-
-    # f_true2x2, _ = deformation_gradient_element(node_coords[cells], u_true[-1][cells])
-    # f_pred2x2, _ = deformation_gradient_element(node_coords[cells], u_pred_mean[cells])
-    # f_true = jax.vmap(fto3x3)(f_true2x2)
-    # f_pred = jax.vmap(fto3x3)(f_pred2x2)
-    # invariants_true, _ = jax.vmap(invariants_and_derivatives)(f_true)
-    # invariants_pred, _ = jax.vmap(invariants_and_derivatives)(f_pred)
-    # dev_true, vol_true = jax.vmap(transform_input_features)(invariants_true)
-    # dev_pred, vol_pred = jax.vmap(transform_input_features)(invariants_pred)
-    # I1_true = dev_true[:, 0]
-    # I2_true = dev_true[:, 1]
-    # J_true = vol_true
-    # I1_pred = dev_pred[:, 0]
-    # I2_pred = dev_pred[:, 1]
-    # J_pred = vol_pred
-    # # I1_pred = dev_true[:, 0]
-    # # I2_pred = dev_true[:, 1]
-    # # J_pred = vol_true
-    # dev_train, vol_train = jax.vmap(jax.vmap(transform_input_features))(I_obs_all)
-    # I1_train = dev_train[:, :, 0].reshape(-1, 1)
-    # I2_train = dev_train[:, :, 1].reshape(-1, 1)
-    # J_train = vol_train.reshape(-1, 1)
-    
-    # inducing = I_z
-    # plot_fem_verification(I1_true, I2_true, J_true,
-    #                     I1_pred, I2_pred, J_pred,
-    #                     I1_train, I2_train, J_train,
-    #                     inducing, save_path)
-    #plot I1_bar_pred vs I1_bar_true, I2_bar_pred vs I2_bar_true, J_pred vs J_true
-
-    #plot I1_bar vs I2_bar (train, test), I1_bar vs J (train, test), I2_bar vs J (train, test)
+    u_pred_mean = u_pred_sample_array.mean(axis=0)
+    u_pred_std = u_pred_sample_array.std(axis=0)

@@ -6,31 +6,10 @@ from .model import SparseHyperelasticityGP
 from .material_models import BaseMaterialModel
 from .dataclass import GPRawParams, GPParams
 
-# def total_stochastic_loss(p, model: SparseHyperelasticityGP, u_array: jnp.ndarray, loads: jnp.ndarray, coords: jnp.ndarray, cells: jnp.ndarray, node_type: jnp.ndarray, keys: jnp.array) :
-#     model.params = model.load_params(p)
-#     model.gpweight = model.precompute_weights(p)
-#     sigma_free_x = model.params.sigma_free_x
-#     sigma_free_y = model.params.sigma_free_y
-#     sigma_fix_x = model.params.sigma_fix_x
-#     sigma_fix_y = model.params.sigma_fix_y
-#     # sigma_free_x = 1e-3
-#     # sigma_free_y = 1e-3
-#     # sigma_fix_x = 1e-3
-#     # sigma_fix_y = 1e-3
-#     vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, None, None, None, 0))
-#     ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(sigma_free_x, sigma_free_y, sigma_fix_x, sigma_fix_y, u_array, loads, model, coords, cells, node_type, keys)
-#     kl_div = model.kl_divergence()
-#     total_loss = -jnp.mean(ell_) + kl_div
-#     return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood), jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss))
-
 def total_stochastic_loss(p, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, cells, n_nodes, f_neu_nodes, node_type, dNdX, dA, key: jnp.array, n_s) :
     model.params = model.load_params(p)
     model.gpweight = model.precompute_weights(p)
-    
-    # sigma_free_x = 1e-3
-    # sigma_free_y = 1e-3
-    # sigma_fix_x = 0.04875
-    # sigma_fix_y = 0.04875
+
     main_key = jr.split(key, n_s + 1)
     subkey = main_key[1:]
 
@@ -47,41 +26,12 @@ def total_stochastic_loss(p, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, 
     total_loss = -jnp.mean(ell_) + kl_div
     return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood), jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss))
 
-
-# def ell(sigma_free_x, sigma_free_y, sigma_fix_x, sigma_fix_y, u_array, loads, model: SparseHyperelasticityGP, coords, cells, node_type, key) :
-#     piola_func = lambda f: model.piola(f, key)
-#     free_loss, fix_loss = total_physical_loss(u_array, loads, piola_func, coords, cells, node_type)
-
-#     fix_x_loss = fix_loss[:, 0]
-#     fix_y_loss = fix_loss[:, 1]
-#     free_x_loss = free_loss[:, :, 0]
-#     free_y_loss = free_loss[:, :, 1]
-
-#     n_freedofs = free_loss.shape[0] * free_loss.shape[1]
-#     n_fixedofs = fix_loss.shape[0] * fix_loss.shape[1]
-
-#     free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - n_freedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
-#     free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - n_freedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
-#     fix_x_log_likelihood = - (1.0 / (2 * (sigma_fix_x**2))) * jnp.sum(fix_x_loss**2) - n_fixedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_fix_x**2))
-#     fix_y_log_likelihood = - (1.0 / (2 * (sigma_fix_y**2))) * jnp.sum(fix_y_loss**2) - n_fixedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_fix_y**2))
-
-
-#     # free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2)
-#     # free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2)
-#     # fix_x_log_likelihood = - (1.0 / (2 * (sigma_fix_x**2))) * jnp.sum(fix_x_loss**2)
-#     # fix_y_log_likelihood = - (1.0 / (2 * (sigma_fix_y**2))) * jnp.sum(fix_y_loss**2)
-
-#     expected_log_likelihood = free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
-#     return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, jnp.sum(free_loss**2) , jnp.sum(fix_loss**2))
-
-
 def ell(p, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA) :
     sigma_free_x = p.sigma_free_x
     sigma_free_y = p.sigma_free_y
-    # sigma_fix_x = p.sigma_fix_x
-    # sigma_fix_y = p.sigma_fix_y
-    sigma_fix_x = 0.05 * 0.95
-    sigma_fix_y = 0.05
+    sigma_fix_x = p.sigma_fix_x
+    sigma_fix_y = p.sigma_fix_y
+
     free_loss, fix_loss = jax.vmap(vfm_loss, in_axes=(None, None, 0, None, 0, None, None))(cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
 
     fix_x_loss = fix_loss[:, 0]
@@ -96,12 +46,6 @@ def ell(p, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA) :
     free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - n_freedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
     fix_x_log_likelihood = - (1.0 / (2 * (sigma_fix_x**2))) * jnp.sum(fix_x_loss**2) - n_fixedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_fix_x**2))
     fix_y_log_likelihood = - (1.0 / (2 * (sigma_fix_y**2))) * jnp.sum(fix_y_loss**2) - n_fixedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_fix_y**2))
-
-
-    # free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2)
-    # free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2)
-    # fix_x_log_likelihood = - (1.0 / (2 * (sigma_fix_x**2))) * jnp.sum(fix_x_loss**2)
-    # fix_y_log_likelihood = - (1.0 / (2 * (sigma_fix_y**2))) * jnp.sum(fix_y_loss**2)
 
     expected_log_likelihood = free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
     return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, jnp.sum(free_loss**2) , jnp.sum(fix_loss**2))
@@ -144,6 +88,59 @@ def vfm_loss(cells, n_nodes, f_neu_nodes, node_type, piola2x2, dNdx, dA) :
     fix_loss = jnp.stack([fixed_nodes_loss1, fixed_nodes_loss2])
     return free_loss, fix_loss
 
+
+def neumann_cell_force(coords_el, onehot_types_el, t3, t4):
+    """
+    onehot_types_el: (3, 5) array - one-hot encoded types for 3 nodes
+    Columns: [0: Internal, 1: FixX, 2: FixY, 3: Right(t3), 4: Top(t4)]
+    """
+    edges = jnp.array([[0, 1], [1, 2], [2, 0]])
+    f_cell = jnp.zeros((3, 2))
+
+    for idx in range(3):
+        i, j = edges[idx]
+        
+        # Check if BOTH nodes on this edge share the Neumann 'Right' bit (index 3)
+        is_right = (onehot_types_el[i, 3] == 1) & (onehot_types_el[j, 3] == 1)
+        
+        # Check if BOTH nodes on this edge share the Neumann 'Top' bit (index 4)
+        is_top = (onehot_types_el[i, 4] == 1) & (onehot_types_el[j, 4] == 1)
+
+        L = jnp.linalg.norm(coords_el[j] - coords_el[i])
+
+        # Apply forces independently
+        # The corner edge connecting a 'Type 3' and a 'Type 4' node 
+        # will now correctly pass the check if you set the corner's 
+        # one-hot bits for both 3 and 4 to 1.
+        f_cell = f_cell.at[i, 0].add(jnp.where(is_right, 0.5 * L * t3, 0.0))
+        f_cell = f_cell.at[j, 0].add(jnp.where(is_right, 0.5 * L * t3, 0.0))
+        
+        f_cell = f_cell.at[i, 1].add(jnp.where(is_top, 0.5 * L * t4, 0.0))
+        f_cell = f_cell.at[j, 1].add(jnp.where(is_top, 0.5 * L * t4, 0.0))
+
+    return f_cell
+
+# Support codes
+######################################################################################################################################################################
+
+# def total_stochastic_loss(p, model: SparseHyperelasticityGP, u_array: jnp.ndarray, loads: jnp.ndarray, coords: jnp.ndarray, cells: jnp.ndarray, node_type: jnp.ndarray, keys: jnp.array) :
+#     model.params = model.load_params(p)
+#     model.gpweight = model.precompute_weights(p)
+#     sigma_free_x = model.params.sigma_free_x
+#     sigma_free_y = model.params.sigma_free_y
+#     sigma_fix_x = model.params.sigma_fix_x
+#     sigma_fix_y = model.params.sigma_fix_y
+#     # sigma_free_x = 1e-3
+#     # sigma_free_y = 1e-3
+#     # sigma_fix_x = 1e-3
+#     # sigma_fix_y = 1e-3
+#     vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, None, None, None, 0))
+#     ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(sigma_free_x, sigma_free_y, sigma_fix_x, sigma_fix_y, u_array, loads, model, coords, cells, node_type, keys)
+#     kl_div = model.kl_divergence()
+#     total_loss = -jnp.mean(ell_) + kl_div
+#     return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood), jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss))
+
+
 def physical_loss_per_loadstep_force_controlled(u: jnp.ndarray, load: jnp.ndarray, piola_func, coords: jnp.ndarray, cells: jnp.ndarray, node_type: jnp.ndarray) :
     u_cells = u[cells]
     coord_cells = coords[cells]
@@ -170,7 +167,7 @@ def physical_loss_per_loadstep_force_controlled(u: jnp.ndarray, load: jnp.ndarra
 
     # element nodal traction forces (C, 3, 2)
     f_neu_cells = jax.vmap(
-        _neumann_cell_force, in_axes=(0, 0, None, None)
+        neumann_cell_force, in_axes=(0, 0, None, None)
     )(coord_cells, types, t3, t4)
 
     # assemble global neumann nodal forces
@@ -249,35 +246,3 @@ def supervised_ell(pred_psi, true_psi, sigma_data) :
     n_data = pred_psi.shape[0]
     ell_ = -(1.0 / (2 * (sigma_data)**2)) * jnp.sum((pred_psi - true_psi)**2) - n_data/2.0 * jnp.log(2 * jnp.pi * (sigma_data**2))
     return ell_, (jnp.sum((pred_psi - true_psi)**2), sigma_data)
-
-
-def neumann_cell_force(coords_el, onehot_types_el, t3, t4):
-    """
-    onehot_types_el: (3, 5) array - one-hot encoded types for 3 nodes
-    Columns: [0: Internal, 1: FixX, 2: FixY, 3: Right(t3), 4: Top(t4)]
-    """
-    edges = jnp.array([[0, 1], [1, 2], [2, 0]])
-    f_cell = jnp.zeros((3, 2))
-
-    for idx in range(3):
-        i, j = edges[idx]
-        
-        # Check if BOTH nodes on this edge share the Neumann 'Right' bit (index 3)
-        is_right = (onehot_types_el[i, 3] == 1) & (onehot_types_el[j, 3] == 1)
-        
-        # Check if BOTH nodes on this edge share the Neumann 'Top' bit (index 4)
-        is_top = (onehot_types_el[i, 4] == 1) & (onehot_types_el[j, 4] == 1)
-
-        L = jnp.linalg.norm(coords_el[j] - coords_el[i])
-
-        # Apply forces independently
-        # The corner edge connecting a 'Type 3' and a 'Type 4' node 
-        # will now correctly pass the check if you set the corner's 
-        # one-hot bits for both 3 and 4 to 1.
-        f_cell = f_cell.at[i, 0].add(jnp.where(is_right, 0.5 * L * t3, 0.0))
-        f_cell = f_cell.at[j, 0].add(jnp.where(is_right, 0.5 * L * t3, 0.0))
-        
-        f_cell = f_cell.at[i, 1].add(jnp.where(is_top, 0.5 * L * t4, 0.0))
-        f_cell = f_cell.at[j, 1].add(jnp.where(is_top, 0.5 * L * t4, 0.0))
-
-    return f_cell

@@ -25,19 +25,91 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+import argparse
+import ast
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
+
+    # Dataset & Model Config
+    parser.add_argument('--material_model_name', type=str, default="isihara")
+    parser.add_argument('--disp_noise', type=float, default=0.000)
+    parser.add_argument('--load_noise', type=float, default=0.01)
+    parser.add_argument('--target_load_true_top', type=int, default=8)
+    parser.add_argument('--asym_factor', type=float, default=0.975)
+
+    # Training Config
+    parser.add_argument('--number_of_mci_sampling', type=int, default=3)
+    parser.add_argument('--n_ip', type=int, default=5)
+    parser.add_argument('--beta', type=float, default=40.0)
+    
+    # Booleans (using 0/1 as integers is often safer in shell scripts)
+    parser.add_argument('--is_fixed_reaction_force_noise', type=int, default=0)
+    parser.add_argument('--is_include_prior_mean', type=int, default=0)
+
+    # Handling the List [0, 5, 9]
+    # 'nargs="+"' allows you to pass multiple space-separated integers
+    parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[0, 5, 9])
+    parser.add_argument('--n_iterations', type=int)
+    parser.add_argument('--learning_rate', type=float)
+
+    return parser.parse_args()
+
+def sigma_fix_to_log_sigma_fix(sigma_fix) :
+    return jnp.log(sigma_fix)
+
+
+def freeze_material_params(grads):
+        """Zeros out the gradients for the polynomial material parameters."""
+        return grads._replace(
+            raw_c01=jnp.zeros_like(grads.raw_c01),
+            raw_c02=jnp.zeros_like(grads.raw_c02),
+            raw_c10=jnp.zeros_like(grads.raw_c10),
+            raw_c11=jnp.zeros_like(grads.raw_c11),
+            raw_c20=jnp.zeros_like(grads.raw_c20),
+            raw_k=jnp.zeros_like(grads.raw_k),
+            raw_q=jnp.zeros_like(grads.raw_q),
+            raw_s=jnp.zeros_like(grads.raw_s)
+            # Note: If you also want to freeze observation noise, add them here:
+            # log_sigma_free_x=jnp.zeros_like(grads.log_sigma_free_x), etc.
+        )
+def freeze_reaction_force_noise(grads) :
+    return grads._replace(
+        log_sigma_fix_x=jnp.zeros_like(grads.log_sigma_fix_x),
+        log_sigma_fix_y=jnp.zeros_like(grads.log_sigma_fix_y))
+
+
+
 if __name__ == "__main__" :
     base_save_path = "saved_model"  # change as needed
     os.makedirs(base_save_path, exist_ok=True)
-    training_mode = "stochastic"
-    material_model_name = "isihara"
-    dataset_name = "isihara"
-    disp_noise = 0.000
-    load_noise = 0.005
-    number_of_mci_sampling = 3
-    train_load_steps_indices = [0, 5, 9]
+    # training_mode = "stochastic"
+    args = parse_args()
+
+    # Now use args.variable_name instead of hardcoded values
+    model_name = args.material_model_name
+    indices = args.train_load_steps_indices
+
+
+    material_model_name = args.material_model_name
+
+    disp_noise = args.disp_noise
+    load_noise = args.load_noise
+    target_load_true_top = args.target_load_true_top
+    asym_factor = args.asym_factor
+    number_of_mci_sampling = args.number_of_mci_sampling
+    train_load_steps_indices = args.train_load_steps_indices
+    n_ip = args.n_ip
+    beta = args.beta
+    is_fixed_reaction_force_noise = args.is_fixed_reaction_force_noise
+    is_include_prior_mean = args.is_include_prior_mean
+    n_iterations = args.n_iterations
+    learning_rate = args.learning_rate
+
     # Subfolder with datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-    save_path = os.path.join(base_save_path, timestamp)
+    training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_{is_include_prior_mean}"
+    save_path = os.path.join(base_save_path, f"{timestamp}_{training_config_str}")
     os.makedirs(save_path, exist_ok=True)
 
     # load precomputed dataset
@@ -45,7 +117,7 @@ if __name__ == "__main__" :
     npz_files = list(data_dir.glob("*.npz"))
     if not npz_files:
         raise FileNotFoundError(f"No .npz file found in {data_dir}")
-    prep_dataset_dir = data_dir / f"{material_model_name}_{disp_noise}_{load_noise}.npz"
+    prep_dataset_dir = data_dir / f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}.npz"
     prep_data = jnp.load(prep_dataset_dir)
 
     f2x2 = prep_data["F"][train_load_steps_indices] 
@@ -57,6 +129,7 @@ if __name__ == "__main__" :
     dNdX = prep_data["dNdX"]
     dA = prep_data["dA"]
     cells = prep_data["cells"]
+    load_noise_std = prep_data["load_noise_std"]
 
 
     true_mat_model = get_material(material_model_name)
@@ -68,7 +141,6 @@ if __name__ == "__main__" :
     dev, vol = jax.vmap(jax.vmap(transform_input_features))(I_all)
     dev_flat =  dev.reshape(-1, dev.shape[-1]) 
     vol_flat = vol.reshape(-1, vol.shape[-1])
-    n_ip = 4
     dev_z = farthest_point_sampling_with_fixed_point(dev_flat, n_ip, jnp.array([3.0, 3.0]))
     vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
     plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path)
@@ -77,47 +149,82 @@ if __name__ == "__main__" :
     # Setup random key
     key = jax.random.PRNGKey(0)
     k1, k2, k3, k4 = jax.random.split(key, 4)
+    if is_fixed_reaction_force_noise :
+        params = GPRawParams(
+            # Lengthscales and signal variances (Normal(0, 1))
+            raw_dev_ls=jax.random.normal(k1, (2,)),
+            raw_dev_sig=jax.random.normal(k1, ()),
+            
+            # Inducing point means and variances
+            raw_dev_z =jax.random.normal(k2, (n_ip, 2)),
+            raw_dev_u_mean=jax.random.normal(k2, (n_ip,)),
+            raw_dev_u_var=jax.random.normal(k2, (n_ip,)),
 
-    params = GPRawParams(
-        # Lengthscales and signal variances (Normal(0, 1))
-        raw_dev_ls=jax.random.normal(k1, (2,)),
-        raw_dev_sig=jax.random.normal(k1, ()),
-        
-        # Inducing point means and variances
-        raw_dev_z =jax.random.normal(k2, (n_ip, 2)),
-        raw_dev_u_mean=jax.random.normal(k2, (n_ip,)),
-        raw_dev_u_var=jax.random.normal(k2, (n_ip,)),
+            raw_vol_ls=jax.random.normal(k3, (1,)),
+            raw_vol_sig=jax.random.normal(k3, ()),
 
-        raw_vol_ls=jax.random.normal(k3, (1,)),
-        raw_vol_sig=jax.random.normal(k3, ()),
+            raw_vol_z =jax.random.normal(k4, (n_ip,1)),        
+            raw_vol_u_mean=jax.random.normal(k4, (n_ip,)),
+            raw_vol_u_var=jax.random.normal(k4, (n_ip,)),
 
-        raw_vol_z =jax.random.normal(k4, (n_ip,1)),        
-        raw_vol_u_mean=jax.random.normal(k4, (n_ip,)),
-        raw_vol_u_var=jax.random.normal(k4, (n_ip,)),
+            # Scalar coefficients (randomizing around 0.0)
+            raw_c01=jax.random.normal(k1, ()),
+            raw_c02=jax.random.normal(k2, ()),
+            raw_c10=jax.random.normal(k3, ()),
+            raw_c11=jax.random.normal(k4, ()),
+            raw_c20=jax.random.normal(k1, ()),
+            raw_k=jax.random.normal(k2, ()),
+            raw_q=jax.random.normal(k3, ()),
+            raw_s=jax.random.normal(k4, ()),
 
-        # Scalar coefficients (randomizing around 0.0)
-        raw_c01=jax.random.normal(k1, ()),
-        raw_c02=jax.random.normal(k2, ()),
-        raw_c10=jax.random.normal(k3, ()),
-        raw_c11=jax.random.normal(k4, ()),
-        raw_c20=jax.random.normal(k1, ()),
-        raw_k=jax.random.normal(k2, ()),
-        raw_q=jax.random.normal(k3, ()),
-        raw_s=jax.random.normal(k4, ()),
+            # Noise parameters
+            log_sigma_free_x=jax.random.normal(k1, ()),
+            log_sigma_free_y=jax.random.normal(k2, ()),
+            log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std[0]),
+            log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std[1])
+            )
+    else :
+        params = GPRawParams(
+            # Lengthscales and signal variances (Normal(0, 1))
+            raw_dev_ls=jax.random.normal(k1, (2,)),
+            raw_dev_sig=jax.random.normal(k1, ()),
+            
+            # Inducing point means and variances
+            raw_dev_z =jax.random.normal(k2, (n_ip, 2)),
+            raw_dev_u_mean=jax.random.normal(k2, (n_ip,)),
+            raw_dev_u_var=jax.random.normal(k2, (n_ip,)),
 
-        # Noise parameters
-        log_sigma_free_x=jax.random.normal(k1, ()),
-        log_sigma_free_y=jax.random.normal(k2, ()),
-        log_sigma_fix_x=jax.random.normal(k3, ()),
-        log_sigma_fix_y=jax.random.normal(k4, ())
-    )
+            raw_vol_ls=jax.random.normal(k3, (1,)),
+            raw_vol_sig=jax.random.normal(k3, ()),
+
+            raw_vol_z =jax.random.normal(k4, (n_ip,1)),        
+            raw_vol_u_mean=jax.random.normal(k4, (n_ip,)),
+            raw_vol_u_var=jax.random.normal(k4, (n_ip,)),
+
+            # Scalar coefficients (randomizing around 0.0)
+            raw_c01=jax.random.normal(k1, ()),
+            raw_c02=jax.random.normal(k2, ()),
+            raw_c10=jax.random.normal(k3, ()),
+            raw_c11=jax.random.normal(k4, ()),
+            raw_c20=jax.random.normal(k1, ()),
+            raw_k=jax.random.normal(k2, ()),
+            raw_q=jax.random.normal(k3, ()),
+            raw_s=jax.random.normal(k4, ()),
+
+            # Noise parameters
+            log_sigma_free_x=jax.random.normal(k1, ()),
+            log_sigma_free_y=jax.random.normal(k2, ()),
+            log_sigma_fix_x=jax.random.normal(k3, ()),
+            log_sigma_fix_y=jax.random.normal(k4, ())
+        )
     
     min_dev = jnp.min(dev_z, axis=0)
     min_vol = jnp.min(vol_z, axis=0)
     max_dev = jnp.max(dev_z, axis=0)
     max_vol = jnp.max(vol_z, axis=0)
     main_key = jr.PRNGKey(42)
-    model = SparseHyperelasticityGP(params, I_z, min_dev, min_vol, max_dev, max_vol)
+
+    model = SparseHyperelasticityGP(params, I_z, min_dev, min_vol, max_dev, max_vol, beta = beta, is_include_prior_mean = is_include_prior_mean)
 
 
 
@@ -141,27 +248,8 @@ if __name__ == "__main__" :
     log_scale_variance_history = []
     log_file_path = os.path.join(save_path, "optimization_log.txt")
 
-    warmup_sq = optax.linear_schedule(
-    init_value=1e-2, 
-    end_value=5e-1, 
-    transition_steps=2000
-    )
 
-    # decay_sq = optax.cosine_decay_schedule(
-    #     init_value=5e-1, 
-    #     decay_steps=18000, # Total steps minus warmup
-    #     alpha=0.1          # End at 10% of the peak value
-    # )
-
-    # # 2. Join them
-    # schedule = optax.join_schedules(
-    #     schedules=[warmup_sq, decay_sq],
-    #     boundaries=[2000]
-    # )
-
-    # 3. Use it in the optimizer
-    # opt = optax.adam(learning_rate=schedule)
-    opt = optax.adam(learning_rate=1e-2)
+    opt = optax.adam(learning_rate=learning_rate)
     opt_state = opt.init(params)
     n_nodes = int(cells.max()) + 1
     # Open once and clear (or just let the loop handle it)
@@ -180,22 +268,8 @@ if __name__ == "__main__" :
     }
 
 
-    def freeze_material_params(grads):
-            """Zeros out the gradients for the polynomial material parameters."""
-            return grads._replace(
-                raw_c01=jnp.zeros_like(grads.raw_c01),
-                raw_c02=jnp.zeros_like(grads.raw_c02),
-                raw_c10=jnp.zeros_like(grads.raw_c10),
-                raw_c11=jnp.zeros_like(grads.raw_c11),
-                raw_c20=jnp.zeros_like(grads.raw_c20),
-                raw_k=jnp.zeros_like(grads.raw_k),
-                raw_q=jnp.zeros_like(grads.raw_q),
-                raw_s=jnp.zeros_like(grads.raw_s)
-                # Note: If you also want to freeze observation noise, add them here:
-                # log_sigma_free_x=jnp.zeros_like(grads.log_sigma_free_x), etc.
-            )
 
-    total_step = 50000
+    total_step = n_iterations
     pbar = tqdm(range(total_step), desc="Training Sparse GP", unit="step")
 
 
@@ -207,6 +281,8 @@ if __name__ == "__main__" :
         # JAX execution
         (loss, (log_like_loss, kl_loss, free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, phy_loss, phys_loss2)), grads = loss_and_grad(params, subkey)
         # grads = freeze_material_params(grads)
+        if is_fixed_reaction_force_noise :
+            grads = freeze_reaction_force_noise(grads)
         updates, opt_state = opt.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         
@@ -305,5 +381,7 @@ if __name__ == "__main__" :
 
     learned_gp = SparseHyperelasticityGP(best_params, I_z, min_dev, min_vol, max_dev, max_vol)
     plot_combined_validation(learned_gp, true_mat_model, save_path, step)
+
+    print(f"{timestamp}_{training_config_str}")
 
 

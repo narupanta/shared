@@ -8,6 +8,9 @@
 *.msh
 *.png
 *.pdf
+*.log
+*.pyc
 /coverage_test
 /analysis
 /precomputed_vfm
+/raw_dataset

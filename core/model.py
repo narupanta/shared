@@ -10,7 +10,7 @@ import jax
 from jax import random, vmap, grad, jit
 
 class SparseHyperelasticityGP:
-    def __init__(self, raw_params, I_z: jnp.ndarray, min_dev, min_vol, max_dev, max_vol, sampling_mode = "pws", L=200):
+    def __init__(self, raw_params, I_z: jnp.ndarray, min_dev, min_vol, max_dev, max_vol, sampling_mode = "pws", beta = 1.0, L=200, is_include_prior_mean = False):
         # 1. Inducing points split
         self.dev_z = I_z[:, :2]
         self.vol_z = I_z[:, 2:]
@@ -24,10 +24,12 @@ class SparseHyperelasticityGP:
         self.norm_vol = self.norm_vol(self.vol_z)
 
         self.L = L  # Number of Random Fourier Features
-
+        self.beta = beta
+        self.is_include_prior_mean = is_include_prior_mean
         # 2. Setup Parameters and Weights
         self.params = self.load_params(raw_params)
         self.gpweight = self.precompute_weights(raw_params)
+
     def norm_dev(self, z) :
         return (z - self.min_dev)/(self.max_dev - self.min_dev)
     def norm_vol(self, z) :
@@ -110,13 +112,13 @@ class SparseHyperelasticityGP:
     def dev_mean_func(self, d):
         p = self.params
         i1_bar_3, i2_bar_3 = d[0] - 3, d[1] - 3
-        return (p.c01 * i1_bar_3 + p.c10 * i2_bar_3 + p.c11 * i1_bar_3 * i2_bar_3 + 
-                p.c02 * i1_bar_3**2 + p.c20 * i2_bar_3**2) * 0 
-        # return (p.c01 * i1_bar_3 + p.c10 * i2_bar_3)
+        # return (p.c01 * i1_bar_3 + p.c10 * i2_bar_3 + p.c11 * i1_bar_3 * i2_bar_3 + 
+        #         p.c02 * i1_bar_3**2 + p.c20 * i2_bar_3**2) * self.is_include_prior_mean
+        return (p.c01 * i1_bar_3)  * self.is_include_prior_mean
     def vol_mean_func(self, v):
         p = self.params
         j_minus_1 = v[0] - 1
-        return (p.k * j_minus_1**2 + p.q * jnp.log(v[0])**2) * 0
+        return (p.k * j_minus_1**2 + p.q * jnp.log(v[0])**2) * self.is_include_prior_mean
 
     # --- Pathwise Sampling Logic ---
 
@@ -341,65 +343,4 @@ class SparseHyperelasticityGP:
                               self.gpweight.dev_trace_term, self.params.dev_z.shape[0])
         vol_kl = component_kl(self.gpweight.vol_mahalanobis_term, self.gpweight.vol_logterm, 
                               self.gpweight.vol_trace_term, self.params.vol_z.shape[0])
-        return (dev_kl + vol_kl) * 10 
-
-
-
-from abc import ABC, abstractmethod
-import jax.numpy as jnp
-import jax
-from .dataclass import GPParams, GPWeights, EnergyDist, StressDist
-
-class ProbabilisticHyperelasticModel(ABC):
-    """Abstract Base Class for all Hyperelastic GP models."""
-    
-    @abstractmethod
-    def load_params(self, raw_params) -> GPParams:
-        """Transform raw optimization variables into constrained physical parameters."""
-        pass
-
-    @abstractmethod
-    def psi_dist(self, f: jnp.ndarray) -> EnergyDist:
-        """Return the mean and variance of the strain energy density."""
-        pass
-
-    @abstractmethod
-    def piola_dist(self, f: jnp.ndarray) -> StressDist:
-        """Return the mean and variance of the Piola stress."""
-        pass
-
-    @abstractmethod
-    def kl_divergence(self) -> jnp.ndarray:
-        """Compute KL divergence for the ELBO."""
-        pass
-
-class Neohookean(ProbabilisticHyperelasticModel) :
-    def __init__(self, raw_params: RawParams, I_z: jnp.ndarray) :
-        self.params = self.load_params(raw_params)
-    def load_params(self, raw_params: RawParams) :
-
-        return Params(c01 = jax.nn.softplus(raw_params.raw_c01), c02 = jax.nn.softplus(raw_params.raw_c02),
-                c10 = jax.nn.softplus(raw_params.raw_c10), c11 = jax.nn.softplus(raw_params.raw_c11),
-                c20 = jax.nn.softplus(raw_params.raw_c20), k = jax.nn.softplus(raw_params.raw_k),
-                q = jax.nn.softplus(raw_params.raw_q), s = jax.nn.softplus(raw_params.raw_s),
-                c01_var=jax.nn.softplus(raw_params.raw_c01_var), c02_var=jax.nn.softplus(raw_params.raw_c02_var),
-                c10_var=jax.nn.softplus(raw_params.raw_c10_var), c11_var=jax.nn.softplus(raw_params.raw_c11_var),
-                c20_var=jax.nn.softplus(raw_params.raw_c20_var), k_var=jax.nn.softplus(raw_params.raw_k_var),
-                q_var=jax.nn.softplus(raw_params.raw_q_var), s_var=jax.nn.softplus(raw_params.raw_s_var))
-    
-
-
-
-    def psi(self, f, key) :
-        invariants, _ = invariants_and_derivatives(f)
-        dev, vol = transform_input_features(invariants)
-        i1_bar = dev[0]
-        sample_c01 = self.params.c01 + jax.random.normal(key, (1,)) * self.params.c01_var
-        sample_k = self.params.k = jax.random.normal(key, (1,)) * self.params.k_var
-        dev = sample_c01 * (i1_bar - 3) 
-        vol = sample_k * (vol[0] - 1)**2 
-        return dev + vol
-    
-    def piola(self, f, key) :
-        return jax.grad(lambda f: self.psi(f, key))(f)
-    
+        return (dev_kl + vol_kl) * self.beta

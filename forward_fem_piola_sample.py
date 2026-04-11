@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from sklearn.metrics import r2_score
-
+import argparse
 plt.rcParams.update({
     "font.family": "serif",
     "font.serif": ["Times New Roman", "DejaVu Serif"], # Falls back to DejaVu if Times isn't found
@@ -193,18 +193,33 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, save_pa
     plt.savefig(os.path.join(save_path, "displacement_analysis.png"), dpi=300, bbox_inches='tight')
 # Usage:
 # plot_force_fields(node_coords, cells, R_nodes)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
 
+    # Dataset & Model Config
+    parser.add_argument('--model_path', type=str, default="20260411T115941_isihara_0.0_0.01_8_0.975_5_40.0_1_0")
+    # parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[2, 4, 6, 8])
+    parser.add_argument('--n_sample', type=int, default=128)
+
+
+    return parser.parse_args()
 if __name__ == "__main__" :
-    material_model_name = "isihara"
-    disp_noise = 0.0
-    load_noise = 0.01
-    train_load_step_indices = [0, 5, 9]
-    validation_load_step_indices = [2, 4, 6, 8]
-
+    args = parse_args()
+    # validation_load_step_indices = args.validation_load_step_indices
+    n_sample = args.n_sample
     # load result 
     analysis_dir = Path("coverage_test") 
-    extraction_result_dir = Path("selected_model") 
-    case_name = f"{material_model_name}_{disp_noise}_{load_noise}"
+    extraction_result_dir = Path("saved_model") 
+    # case_name = f"20260410T172507_isihara_0.0_0.01_8_0.975_5_40_0_0"
+    case_name = args.model_path
+    dataset_params = case_name.split("_")
+    asym_factor = float(dataset_params[5])
+    target_load = float(dataset_params[4])
+    load_noise = float(dataset_params[3])
+    disp_noise = float(dataset_params[2])
+    material_model_name = dataset_params[1]
+
+
     save_path = analysis_dir / case_name
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
@@ -239,7 +254,7 @@ if __name__ == "__main__" :
             return first_PK_stress
         
     # Specify mesh-related information (first-order hexahedron element).
-    mesh_data = jnp.load("/home/mmdiscovery/shared/mesh/mesh.npz")
+    mesh_data = jnp.load("mesh/mesh.npz")
     node_coords = mesh_data["node_coords"][:, :2]
     cells = mesh_data["cells"]
     ele_type = 'TRI3'
@@ -313,11 +328,11 @@ if __name__ == "__main__" :
         "ksp_atol": 1e-8,
     }
     key = jax.random.PRNGKey(42)
-    asym_factor = 0.95
+    # asym_factor = 0.95
     # num_load_samples = 32
     num_steps = 10
     # loads_top = jnp.linspace(0.0, 10, 10)
-    target_load = 10.0
+    # target_load = 10.0
     noise_std = load_noise * target_load
     target_load_noisy = target_load + noise_std * jax.random.normal(key)
 
@@ -372,7 +387,6 @@ if __name__ == "__main__" :
     u_pred_samples = []
 
 
-    n_piola_sample = 512
 
     # pred_piola_stress_funcs = []
     main_key = jr.PRNGKey(128)
@@ -381,7 +395,7 @@ if __name__ == "__main__" :
     #     pred_piola_stress_func = lambda f: model.piola(fto3x3(f), key)[:2, :2]
     #     pred_piola_stress_funcs.append(pred_piola_stress_func)
 
-    for i in range(n_piola_sample) :
+    for i in range(n_sample) :
         main_key, subkey = jr.split(main_key)
         problem_pred = HyperElasticity(mesh = mesh,
                                 vec=2,
@@ -393,43 +407,6 @@ if __name__ == "__main__" :
         
         u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
         u_pred_samples.append(u_pred)
-        if not os.path.exists(os.path.join(save_path, "piola_load_samples")):
-            os.makedirs(os.path.join(save_path, "piola_load_samples"))
-        np.savez_compressed(os.path.join(save_path, f"piola_load_samples/u_pred_ps{i}.npz"), u_pred=u_pred, cells=cells, node_coords=node_coords, node_type=node_type)
-    u_pred_sample_array = jnp.array(u_pred_samples)[:, -1, :, :]
-
-    u_pred_mean = u_pred_sample_array.mean(axis=0)
-    u_pred_std = u_pred_sample_array.std(axis=0)
-
-    # plot_disp_field(node_coords, cells, u_true[-1], u_pred_mean, u_pred_std, save_path)
-
-    # f_true2x2, _ = deformation_gradient_element(node_coords[cells], u_true[-1][cells])
-    # f_pred2x2, _ = deformation_gradient_element(node_coords[cells], u_pred_mean[cells])
-    # f_true = jax.vmap(fto3x3)(f_true2x2)
-    # f_pred = jax.vmap(fto3x3)(f_pred2x2)
-    # invariants_true, _ = jax.vmap(invariants_and_derivatives)(f_true)
-    # invariants_pred, _ = jax.vmap(invariants_and_derivatives)(f_pred)
-    # dev_true, vol_true = jax.vmap(transform_input_features)(invariants_true)
-    # dev_pred, vol_pred = jax.vmap(transform_input_features)(invariants_pred)
-    # I1_true = dev_true[:, 0]
-    # I2_true = dev_true[:, 1]
-    # J_true = vol_true
-    # I1_pred = dev_pred[:, 0]
-    # I2_pred = dev_pred[:, 1]
-    # J_pred = vol_pred
-    # # I1_pred = dev_true[:, 0]
-    # # I2_pred = dev_true[:, 1]
-    # # J_pred = vol_true
-    # dev_train, vol_train = jax.vmap(jax.vmap(transform_input_features))(I_obs_all)
-    # I1_train = dev_train[:, :, 0].reshape(-1, 1)
-    # I2_train = dev_train[:, :, 1].reshape(-1, 1)
-    # J_train = vol_train.reshape(-1, 1)
-    
-    inducing = I_z
-    # plot_fem_verification(I1_true, I2_true, J_true,
-    #                     I1_pred, I2_pred, J_pred,
-    #                     I1_train, I2_train, J_train,
-    #                     inducing, save_path)
-    #plot I1_bar_pred vs I1_bar_true, I2_bar_pred vs I2_bar_true, J_pred vs J_true
-
-    #plot I1_bar vs I2_bar (train, test), I1_bar vs J (train, test), I2_bar vs J (train, test)
+        if not os.path.exists(os.path.join(save_path, "piola_samples")):
+            os.makedirs(os.path.join(save_path, "piola_samples"))
+        np.savez_compressed(os.path.join(save_path, f"piola_samples/u_pred_ps{i}.npz"), u_pred=u_pred, cells=cells, node_coords=node_coords, node_type=node_type)

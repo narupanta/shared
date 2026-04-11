@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as tri
 import numpy as np
 import matplotlib.pyplot as plt
-
+import argparse
 
 
 def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot, save_path):
@@ -136,25 +136,21 @@ def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot,
         save_file = os.path.join(save_path, f"analysis_{label}_{node_to_plot}_direction.png")
         plt.savefig(save_file, dpi=300, bbox_inches='tight')
         plt.show()
-
-def plot_node_distributions(u_true_samples, u_pred_samples, node_to_plot, save_path):
+def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_samples, node_to_plot, save_path):
     """
-    Plots local distributions for a list of nodes.
-    Rows: Each node in node_to_plot
-    Columns: X-direction, Y-direction
+    Plots local distributions with 95% Quantile CIs for a list of nodes.
     """
     os.makedirs(save_path, exist_ok=True)
     
     num_nodes_to_plot = len(node_to_plot)
     fig, axes = plt.subplots(num_nodes_to_plot, 2, figsize=(14, 5 * num_nodes_to_plot))
     
-    # Ensure axes is 2D even if only one node is plotted
     if num_nodes_to_plot == 1:
         axes = np.expand_dims(axes, axis=0)
 
     directions = [
-        {'idx': 0, 'label': 'X', 'color': 'dodgerblue'},
-        {'idx': 1, 'label': 'Y', 'color': 'teal'}
+        {'idx': 0, 'label': 'X', 'color1': 'dodgerblue', 'color2': 'violet'},
+        {'idx': 1, 'label': 'Y', 'color1': 'teal', 'color2': 'green'}
     ]
 
     for i, node_idx in enumerate(node_to_plot):
@@ -164,31 +160,41 @@ def plot_node_distributions(u_true_samples, u_pred_samples, node_to_plot, save_p
             
             # 1. Extract Data
             samples = u_pred_samples[:, node_idx, d]
-            true_samples = u_true_samples[:, node_idx, d]
-            pred_mean = np.mean(samples)
-            pred_std = np.std(samples)
-            true_mean = np.mean(true_samples)
-            true_std = np.std(true_samples)
+            pt_samples = u_pred_piola_traction_samples[:, node_idx, d]
+            u_true_node = u_true[node_idx, d]
+            
+            # 2. Calculate Robust Statistics (Quantiles)
+            # Piola Samples
+            p_median = np.median(samples)
+            p_low, p_high = np.quantile(samples, [0.025, 0.975])
+            
+            # Piola Traction Samples
+            pt_median = np.median(pt_samples)
+            pt_low, pt_high = np.quantile(pt_samples, [0.025, 0.975])
 
-            
-            # 2. Plot Histogram of Predicted Samples
+            # 3. Plot Histograms
             ax.hist(samples, bins=40, density=True, alpha=0.3, 
-                    color=d_info['color'], label='Predicted Samples')
-            ax.hist(true_samples, bins=40, density=True, alpha=0.3, 
-                    color='red', label='True Samples')
-            # 3. Add Vertical Lines
-            ax.axvline(true_mean, color='red', linestyle='-', linewidth=2, label=f'Mean True: {true_mean:.4e}, Std True: {true_std:.4e}')
-            ax.axvline(pred_mean, color=d_info['color'], linestyle='--', linewidth=2, label=f'Mean Pred: {pred_mean:.4e}, Std True: {pred_std:.4e}')
+                    color=d_info['color1'], label='Piola Samples')
+            ax.hist(pt_samples, bins=40, density=True, alpha=0.3, 
+                    color=d_info['color2'], label='Piola Traction Samples')
+
+            # 4. Add Vertical Lines for Medians
+            ax.axvline(u_true_node, color='red', linestyle='-', linewidth=2, 
+                       label=f'True: {u_true_node:.4e}')
+            ax.axvline(p_median, color=d_info['color1'], linestyle='--', linewidth=1.5, 
+                       label=f'Piola Median: {p_median:.4e}')
+            ax.axvline(pt_median, color=d_info['color2'], linestyle='--', linewidth=1.5, 
+                       label=f'PT Median: {pt_median:.4e}')
+
+            # 5. Plot Confidence Intervals as Shaded Regions (95% CI)
+            ax.axvspan(p_low, p_high, color=d_info['color1'], alpha=0.1, 
+                       label='Piola 95% CI')
+            ax.axvspan(pt_low, pt_high, color=d_info['color2'], alpha=0.1, 
+                       label='PT 95% CI')
             
-            # 4. Add Gaussian Distribution for True (std = 1e-4)
-            # sigma_target = 1e-4
-            # Create a range for the PDF centered at true_val
-            # x_min = min(samples.min(), true_mean - 4*true_std)
-            # x_max = max(samples.max(), true_mean + 4*true_std)
-            # x_axis = np.linspace(x_min, x_max, 200)
-            
-            # ax.plot(x_axis, norm.pdf(x_axis, true_mean, true_std), 
-            #         color='red', linestyle=':', alpha=0.8, label=f'Target $\sigma$ {true_std}')
+            # Optional: Add faint boundary lines for the CIs
+            ax.axvline(p_low, color=d_info['color1'], linestyle=':', alpha=0.5, linewidth=1)
+            ax.axvline(p_high, color=d_info['color1'], linestyle=':', alpha=0.5, linewidth=1)
             
             # Formatting
             if i == 0:
@@ -196,15 +202,15 @@ def plot_node_distributions(u_true_samples, u_pred_samples, node_to_plot, save_p
             if d == 0:
                 ax.set_ylabel(f'Node {node_idx}\nDensity', fontsize=12, fontweight='bold')
                 
-            ax.legend(fontsize=8, loc='upper right')
+            ax.legend(fontsize=7, loc='upper right', frameon=True, framealpha=0.8)
             ax.grid(alpha=0.2)
 
-    plt.suptitle(f'Local Displacement Distributions at Selected Nodes', fontsize=18, y=1.02)
+    plt.suptitle('Local Displacement Distributions: Median & 95% Quantile CI', fontsize=18, y=1.02)
     plt.tight_layout()
     
-    save_file = os.path.join(save_path, "local_node_distributions.png")
+    save_file = os.path.join(save_path, "local_node_distributions_quantile.png")
     plt.savefig(save_file, dpi=300, bbox_inches='tight')
-    plt.show()
+    # plt.show()
 # Example: plot_comprehensive_analysis(u_true, u_pred_samples, 50, "plots/")
 
 # Usage:
@@ -295,13 +301,90 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, node_in
     plt.savefig(os.path.join(save_path, "displacement_analysis.png"), dpi=300, bbox_inches='tight')
 
 
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+from sklearn.metrics import r2_score
+
+def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_path, suffix="_"):
+    """
+    Plots Predicted vs True values for both X and Y directions in subplots.
+    Expects arrays of shape (N, 2) for x and y components.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    labels = ['X-Direction', 'Y-Direction']
+    
+    for i, ax in enumerate(axes):
+        # Extract components
+        y_true = u_true[:, i]
+        y_mean = u_pred_med[:, i]
+        y_lower = u_pred_lower[:, i]
+        y_upper = u_pred_upper[:, i]
+        
+        # Calculate 95% Confidence Interval (1.96 * std)
+        # ci_bound = 1.96 * y_std
+        lower_bound = y_lower
+        upper_bound = y_upper
+        ci_bound = y_upper - y_lower
+        
+        # Instead of y_mean and y_std, pass the raw samples (samples_array)
+        # lower_bound = np.quantile(samples_array, 0.025, axis=0)
+        # upper_bound = np.quantile(samples_array, 0.975, axis=0)
+        # y_mean = np.median(samples_array, axis=0) # Median is more robust for non-normal
+        # Calculate Coverage & R2
+        inside_ci = (y_true >= lower_bound) & (y_true <= upper_bound)
+        coverage_pct = np.mean(inside_ci) * 100
+        r2 = r2_score(y_true, y_mean)
+        
+        # Scatter with error bars
+        ax.errorbar(y_true, y_mean, yerr=ci_bound, fmt='o', ecolor='lightgray', 
+                    alpha=0.4, label='Pred Mean with 95% CI', markersize=3)
+        
+        # Identity line (45 degree)
+        limits = [
+            min(y_true.min(), y_mean.min()),
+            max(y_true.max(), y_mean.max())
+        ]
+        ax.plot(limits, limits, 'r--', linewidth=1.5, label='Perfect Match')
+        
+        # Formatting each subplot
+        ax.set_title(f'{labels[i]}\nCoverage: {coverage_pct:.2f}% | $R^2$: {r2:.4f}')
+        ax.set_xlabel(f'True $u_{labels[i][0].lower()}$')
+        ax.set_ylabel(f'Predicted $\mu_{labels[i][0].lower()}$')
+        ax.grid(True, linestyle=':', alpha=0.6)
+        ax.legend(prop={'size': 8})
+
+    plt.tight_layout()
+    
+    if save_path:
+        # Ensure the directory exists
+        if not os.path.exists(save_path):
+            os.makedirs(save_path, exist_ok=True)
+        
+        save_file = os.path.join(save_path, f"disp_r2_coverage_xy_{suffix}.png")
+        plt.savefig(save_file, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {save_file}")
+    
+    plt.show()
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
+
+    # Dataset & Model Config
+    parser.add_argument('--model_path', type=str, default="20260411T115941_isihara_0.0_0.01_8_0.975_5_40.0_1_0")
+    parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[2, 4, 6, 8])
+    parser.add_argument('--n_sample', type=int, default=128)
+
+
+    return parser.parse_args()
+
 if __name__ == "__main__" :
+    args = parse_args()
     # read file from coverage/{mat_model}_{disp_noise}_{load_noise}
-    material_model_name = "isihara"
-    disp_noise = 0.000
-    load_noise = 0.01
-    train_load_step_indices = [0, 5, 9]
-    validation_load_step_indices = [2, 4, 6, 8]
+    # material_model_name = "isihara"
+    validation_load_step_indices = args.validation_load_step_indices
+    n_sample = args.n_sample
+    model_path = args.model_path
 
     # load result 
 
@@ -309,31 +392,33 @@ if __name__ == "__main__" :
 
     analysis_dir = Path("coverage_test") 
     extraction_result_dir = Path("selected_model") 
-    case_name = f"{material_model_name}_{disp_noise}_{load_noise}"
+    case_name = args.model_path
+    precomputed_vfm_name = f"{case_name.split("_")[1]}_{case_name.split("_")[2]}_{case_name.split('_')[3]}_{case_name.split('_')[4]}_{case_name.split('_')[5]}"
+
     save_path = analysis_dir / case_name
     save_path.mkdir(parents=True, exist_ok=True)
 
-    step = -1
-    pred_dir_name = analysis_dir / f"{material_model_name}_{disp_noise}_{load_noise}" 
-    gt_samples_dir_name = analysis_dir / f"{material_model_name}_gt_{load_noise}"
-    files = os.listdir(pred_dir_name / "piola_load_samples")
-    t_files = os.listdir(gt_samples_dir_name)
-    true_data = np.load(true_data_dir / f"{case_name}.npz")
+    step = validation_load_step_indices[-1]
+    pred_dir_name = analysis_dir / case_name
+    # gt_samples_dir_name = analysis_dir / f"{material_model_name}_gt_{load_noise}"
+    files = os.listdir(pred_dir_name / "piola_samples")
+    pt_files = os.listdir(pred_dir_name / "piola_traction_samples")
+    true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
     u_true = true_data["u"][step]
 
-    u_samples = [] 
+    u_pred_piola_samples = [] 
     for f in files :
-        data = np.load(pred_dir_name/ "piola_load_samples" / f)
-        u_samples.append(data["u_pred"][step])
-    u_samples = jnp.array(u_samples)
+        data = np.load(pred_dir_name/ "piola_samples" / f)
+        u_pred_piola_samples.append(data["u_pred"][step])
+    u_pred_piola_samples = jnp.array(u_pred_piola_samples)
 
-    u_true_samples = []
-    for f in t_files :
-        data = np.load(gt_samples_dir_name/ f)
-        u_true_samples.append(data["u"][step])
-    u_true_samples = jnp.array(u_true_samples)
+    u_pred_piola_traction_samples = []
+    for f in pt_files :
+        data = np.load(pred_dir_name/ "piola_traction_samples" / f)
+        u_pred_piola_traction_samples.append(data["u_pred"][step])
+    u_pred_piola_traction_samples = jnp.array(u_pred_piola_traction_samples)
 
-    err = u_samples - u_true[None, :, :]
+    # err = u_samples - u_true[None, :, :]
     import numpy as np
 
     # Define target locations on the r = 0.1 circle
@@ -356,12 +441,51 @@ if __name__ == "__main__" :
         node_indices.append(np.argmin(dist).item())
 
     print(f"Closest node indices: {node_indices}")
-    plot_disp_field(data["node_coords"], data["cells"], u_true, u_samples.mean(axis=0), u_samples.std(axis=0), node_indices, save_path)
+    # plot_disp_field(data["node_coords"], data["cells"], u_true, u_pred_piola_samples.mean(axis=0), u_pred_piola_samples.std(axis=0), node_indices, save_path)
+    # plot_disp_field(data["node_coords"], data["cells"], u_true, u_pred_piola_samples.mean(axis=0), u_pred_piola_samples.std(axis=0), node_indices, save_path)
     # plot disp field
     # node_index = 100
-    u_pred_samples = u_samples
+    # u_pred_samples = u_pred_piola_samples
+    # u_pt_lower_bound = np.quantile(u_pred_piola_samples, 0.025, axis=0)
+    # u_pt_upper_bound = np.quantile(u_pred_piola_samples, 0.975, axis=0)
     node_type = true_data["node_type"]
-    plot_node_distributions(u_true_samples, u_pred_samples, node_indices, save_path)
+    plot_disp_field(data["node_coords"], data["cells"], u_true, u_pred_piola_samples.mean(axis=0), u_pred_piola_samples.std(axis=0), node_indices, save_path)
+
+    plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
+    # plot_disp_r2_coverage(u_true, u_pred_samples.mean(axis=0), u_pred_samples.std(axis=0), save_path)
+
+    true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
+    u_true_val = true_data["u"][validation_load_step_indices]
+
+    u_pred_piola_samples_val = [] 
+    for f in files :
+        data = np.load(pred_dir_name/ "piola_samples" / f)
+        u_pred_piola_samples_val.append(data["u_pred"][validation_load_step_indices])
+    u_pred_piola_samples_val = jnp.array(u_pred_piola_samples_val)
+    p_val_shape = u_pred_piola_samples_val.shape
+    u_pred_piola_samples_val_flat = u_pred_piola_samples_val.reshape(p_val_shape[0], -1, 2)
+    u_pred_piola_traction_samples_val = []
+    for f in pt_files :
+        data = np.load(pred_dir_name/ "piola_traction_samples" / f)
+        u_pred_piola_traction_samples_val.append(data["u_pred"][validation_load_step_indices])
+    u_pred_piola_traction_samples_val = jnp.array(u_pred_piola_traction_samples_val)
+    pt_val_shape = u_pred_piola_traction_samples_val.shape
+
+    u_pred_piola_traction_samples_val_flat = u_pred_piola_traction_samples_val.reshape(pt_val_shape[0], -1, 2)
+    u_true_val_flat = u_true_val.reshape(-1, 2)
+    
+
+    u_pt_lower_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.025, axis=0)
+    u_pt_upper_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.975, axis=0)
+    u_pt_median = np.quantile(u_pred_piola_traction_samples_val_flat, 0.5, axis=0)
+    plot_disp_r2_coverage(u_true_val_flat, u_pt_median, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix ="_piola_traction")
+
+
+    u_p_lower_bound = np.quantile(u_pred_piola_samples_val_flat, 0.025, axis=0)
+    u_p_upper_bound = np.quantile(u_pred_piola_samples_val_flat, 0.975, axis=0)
+    u_p_median = np.quantile(u_pred_piola_samples_val_flat, 0.5, axis=0)
+    plot_disp_r2_coverage(u_true_val_flat, u_p_median, u_p_lower_bound, u_p_upper_bound, save_path, suffix ="_piola")
+
     # for n_idx in node_indices :
     #     plot_comprehensive_analysis(u_true, u_pred_samples, node_type, n_idx, save_path)
     pass

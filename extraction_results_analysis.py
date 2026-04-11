@@ -667,7 +667,7 @@ if __name__ == "__main__" :
     load_noise = 0.005
     train_load_step_indices = [0, 5, 9]
     validation_load_step_indices = [2, 4, 6, 8]
-    num_val_samples = 64
+    num_val_samples = 128
 
     # load result 
     analysis_dir = Path("analysis") 
