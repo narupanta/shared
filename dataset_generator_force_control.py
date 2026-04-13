@@ -36,7 +36,7 @@ def FEM_solve(material_model_name, loads) :
     # 1. Parameters
     L_x, L_y = 1.0, 1.0
     R_hole = 0.1
-    mesh_size_far = 0.08     # Coarse at corners
+    mesh_size_far = 0.05  # Coarse at corners
     mesh_size_near = 0.02  # Very dense at circle
 
     # 2. Geometry
@@ -46,6 +46,7 @@ def FEM_solve(material_model_name, loads) :
     # Boolean Cut
     # returns [(2, tag)], [ [(2, tag)], ... ]
     out_tags, _ = model.cut([(2, rect)], [(2, circle)])
+    # out_tags = rect
     model.synchronize()
 
     # 3. Automatic Hole Identification
@@ -71,7 +72,7 @@ def FEM_solve(material_model_name, loads) :
     gmsh.model.mesh.field.setNumber(2, "SizeMin", mesh_size_near)
     gmsh.model.mesh.field.setNumber(2, "SizeMax", mesh_size_far)
     gmsh.model.mesh.field.setNumber(2, "DistMin", 0.02) # Fineness stays constant for this distance
-    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.25) # Gradually becomes coarse until this distance
+    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.75) # Gradually becomes coarse until this distance
 
     gmsh.model.mesh.field.setAsBackgroundMesh(2)
 
@@ -144,8 +145,8 @@ def FEM_solve(material_model_name, loads) :
     # Locate DOFs (note the use of collapsed spaces)
     left_dofs = fem.locate_dofs_topological(V.sub(0), facet_tag.dim, facet_tag.find(1))
     bottom_dofs = fem.locate_dofs_topological(V.sub(1), facet_tag.dim, facet_tag.find(2))
-    right_dofs = fem.locate_dofs_topological(V.sub(0), facet_tag.dim, facet_tag.find(3))
-    top_dofs = fem.locate_dofs_topological(V.sub(1), facet_tag.dim, facet_tag.find(4))
+    right_dofs = fem.locate_dofs_topological(V, facet_tag.dim, facet_tag.find(3))
+    top_dofs = fem.locate_dofs_topological(V, facet_tag.dim, facet_tag.find(4))
 
 
     # Next, we define the body force on the reference configuration (`B`), and nominal (first Piola-Kirchhoff) traction (`T`).
@@ -165,12 +166,17 @@ def FEM_solve(material_model_name, loads) :
 
     # +
     # Identity tensor
-    I = ufl.variable(ufl.Identity(3))
+    I = ufl.variable(ufl.Identity(domain.topology.dim + 1))
     def grad_3D(u):
         return ufl.as_matrix([[u[0].dx(0), u[0].dx(1), 0], 
                             [u[1].dx(0), u[1].dx(1), 0], 
                             [0, 0, 0]])
+    # def grad_2D(u):
+    #     return ufl.as_matrix([[u[0].dx(0), u[0].dx(1)], 
+    #                           [u[1].dx(0), u[1].dx(1)]])
+    #
     F = ufl.variable(I + grad_3D(u))
+    # F = ufl.variable(I + ufl.grad(u))
 
     # Right Cauchy-Green tensor
     C = ufl.variable(F.T * F)
@@ -184,7 +190,7 @@ def FEM_solve(material_model_name, loads) :
 
     # Stored strain energy density (compressible neo-Hookean model)
     if material_model_name == "isihara" :
-        psi =  0.5 * (J**(-2/3) * Ic - 3) + (J**(-2/3) * Ic - 3)**2 +  (J**(-4/3) * I2 - 3) + 1.5 * (J - 1)**2 #isihara
+        psi =  0.5 * (J**(-2/3) * Ic - 3) + (J**(-2/3) * Ic - 3)**2 + (J**(-4/3) * I2 - 3) + 1.5 * (J - 1)**2 #isihara
     elif material_model_name == "neohookean" :
         psi = 0.5 * (J**(-2/3) * Ic - 3) + 1.5 * (J - 1)**2 # neohookean
     elif material_model_name == "gentthomas" :
@@ -195,9 +201,9 @@ def FEM_solve(material_model_name, loads) :
 
     P = ufl.diff(psi, F)
 
-    metadata = {"quadrature_degree": 4}
-    ds = ufl.Measure("ds", domain=domain, subdomain_data=facet_tag, metadata=metadata)
-    dx = ufl.Measure("dx", domain=domain, metadata=metadata)
+    # metadata = {"quadrature_degree": 4}
+    ds = ufl.Measure("ds", domain=domain, subdomain_data=facet_tag)
+    dx = ufl.Measure("dx", domain=domain)
 
     # Define the residual of the equation (we want to find u such that residual(u) = 0)
 
@@ -210,11 +216,12 @@ def FEM_solve(material_model_name, loads) :
 
     petsc_options = {
         "snes_type": "newtonls",
-        "snes_linesearch_type": "none",
+        "snes_linesearch_type": "bt",
         "snes_monitor": None,
         "snes_atol": 1e-10,
         "snes_rtol": 1e-10,
         "snes_stol": 1e-10,
+        "snes_max_it": 50,
         "ksp_type": "preonly",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",
@@ -260,11 +267,14 @@ def FEM_solve(material_model_name, loads) :
     reactions = []
     loads = []
     for i, n in enumerate(load_steps):
-        T_right.value[0] = n[0]
-        T_top.value[1] = n[1]
+        T_top.value[1], T_right.value[0] = n[1], n[0]
+        # T_right.value[0] = n[0]
+        # T_top.value[1] = n[1]
 
         problem.solve()
-
+        converged = problem.solver.getConvergedReason()
+        num_its = problem.solver.getIterationNumber()
+        assert converged > 0, f"Solver did not converge with reason {converged}."
         u_array = u.x.array[:].reshape(mesh_pos.shape[0], -1)
         u_steps[i] = u_array.copy()
 
@@ -318,9 +328,9 @@ def plot_dataset_viz(data, material_model_name, disp_noise_level, load_noise_lev
     # Displacement components (ux and uy) at each node
     # This simulates a simple shear/tensile deformation
     percent_noise = 0.000
-    ux = data["u"][len(data["u"].keys()) - 1][:, 0]
+    ux = np.array(data["u"][-1, :, 0])
     ux[(data["node_type"][:, 1] != 1)] += np.random.normal(0, percent_noise, ux.shape)[(data["node_type"][:, 1] != 1)]
-    uy = data["u"][len(data["u"].keys()) - 1][:, 1]
+    uy = np.array(data["u"][-1, :, 1])
     uy[(data["node_type"][:, 2] != 1)] += np.random.normal(0, percent_noise, uy.shape)[(data["node_type"][:, 2] != 1)]
 
     # Combine components into the full displacement vector u
@@ -391,15 +401,15 @@ def plot_dataset_viz(data, material_model_name, disp_noise_level, load_noise_lev
     if not os.path.exists(save_path):
         os.makedirs(save_path)
    
-    plt.savefig(save_path / f"{material_model_name}_{disp_noise_level}_{load_noise_level}.png", dpi=300, bbox_inches='tight')
+    plt.savefig(save_path + f"/{material_model_name}_{disp_noise_level}_{load_noise_level}.png", dpi=300, bbox_inches='tight')
 if __name__ == '__main__' :
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default="isihara")
     parser.add_argument('--disp_noise', type=float, default=0.0)
-    parser.add_argument('--load_noise', type=float, default=0.01)
-    parser.add_argument('--target_top', type=float, default=8.0)
-    parser.add_argument('--asym', type=float, default=0.975)
-    parser.add_argument('--n_steps', type=int, default=10)
+    parser.add_argument('--load_noise', type=float, default=0.03)
+    parser.add_argument('--target_top', type=float, default=10.0)
+    parser.add_argument('--asym', type=float, default=0.9)
+    parser.add_argument('--n_steps', type=int, default=21)
     args = parser.parse_args()
 
     # Assign from args
@@ -411,7 +421,7 @@ if __name__ == '__main__' :
     target_load_top_true = args.target_top
 
 
-    target_load_right_true = target_load_top_true * asymetric_factor
+    target_load_right_true = 9.0
     target_load_true = np.array([target_load_right_true, target_load_top_true])
     load_noise_std = load_noise_level * target_load_true 
     target_load_noisy = np.random.normal(target_load_true, load_noise_std)
@@ -434,7 +444,7 @@ if __name__ == '__main__' :
         # data_ = dict(mesh_pos = data["mesh_pos"], cells = data["cells"], u = data["u"][step], node_type = data["node_type"], reaction = data["reactions"][step], load = data["loads"][step], load_noise_std = load_noise_std)
         data_ = dict(mesh_pos = data["mesh_pos"], cells = data["cells"], u = data["u"][step], node_type = data["node_type"], reaction = data["reactions"][step], load = noisy_load[step], load_noise_std = load_noise_std)
         
-        np.savez_compressed(f"{save_raw_dataset_dir}/disp_{step}.npz", **data_)
+        np.savez_compressed(f"{save_raw_dataset_dir}/disp_{step:02d}.npz", **data_)
 
     random_key = jax.random.PRNGKey(0)
 
@@ -451,8 +461,6 @@ if __name__ == '__main__' :
     load_all = []
     f_neu_all = []
 
-    load_stat = jnp.array([d["load"] for d in data])
-    mean_load = jnp.mean(load_stat)
     
     for d in data :
         random_key, subkey_disp, subkey_load = jax.random.split(random_key, 3)
@@ -468,9 +476,6 @@ if __name__ == '__main__' :
         cells = d["cells"]
         node_type = d["node_type"]
         load = d["load"]
-        # check = load_noise * mean_load
-        # load_noise_ = jax.random.normal(subkey_load, load.shape) * load_noise * mean_load
-        # load += load_noise_
 
         m_cells = mesh_pos[cells]
         u_cells = u[cells]
@@ -496,3 +501,4 @@ if __name__ == '__main__' :
     # save all as npz in /precomputed_vfm/{material_model}_{disp_noise}_{load_noise}/
     precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std)
     np.savez_compressed(f"precomputed_vfm/{material_model_name}_{disp_noise_level}_{load_noise_level}_{target_load_top_true}_{asymetric_factor}.npz", **precomputed_vfm)
+    plot_dataset_viz(precomputed_vfm, material_model_name, disp_noise_level, load_noise_level, "dataset_viz/")
