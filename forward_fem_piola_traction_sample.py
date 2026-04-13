@@ -319,11 +319,15 @@ if __name__ == "__main__" :
 
     petsc_options = {
         "snes_type": "newtonls",
-        "snes_linesearch_type": "bt", 
-        "ksp_type": "gmres",
-        "pc_type": "hypre",
-        "ksp_rtol": 1e-5,  # Force higher accuracy in the linear solve
-        "ksp_atol": 1e-8,
+        "snes_linesearch_type": "bt",
+        "snes_monitor": None,
+        "snes_atol": 1e-10,
+        "snes_rtol": 1e-10,
+        "snes_stol": 1e-10,
+        "snes_max_it": 50,
+        "ksp_type": "preonly",
+        "pc_type": "lu",
+        "pc_factor_mat_solver_type": "mumps",
     }
     key = jax.random.PRNGKey(42)
 
