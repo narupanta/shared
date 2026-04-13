@@ -18,6 +18,7 @@ import argparse
 from core.utils import deformation_gradient_element, transformation_jacobian
 from core.loss_function import neumann_cell_force
 from pathlib import Path
+from convert_msh_to_npz import convert_msh_to_npz
 
 def facets_to_nodes(domain, facet_ids):
     fdim = domain.topology.dim - 1
@@ -95,6 +96,7 @@ def FEM_solve(material_model_name, loads) :
 
     # 8. Read into DOLFINx
     mesh_ = read_from_msh("mesh/training_mesh.msh", MPI.COMM_WORLD, 0, 2)
+    convert_msh_to_npz("mesh/training_mesh.msh", "mesh/training_mesh.npz")
     domain = mesh_.mesh
     V = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
     print(domain.geometry.dim)

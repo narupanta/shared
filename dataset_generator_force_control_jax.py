@@ -4,6 +4,9 @@ import jax
 import jax.numpy as jnp
 import os
 from pathlib import Path
+import gmsh
+from mpi4py import MPI
+from dolfinx.io.gmsh import read_from_msh
 # Import JAX-FEM specific modules.
 from jax_fem.problem import Problem
 from jax_fem.solver import solver
@@ -27,7 +30,7 @@ import matplotlib.tri as tri
 import numpy as np
 import matplotlib.pyplot as plt
 import numpy as np
-
+from convert_msh_to_npz import convert_msh_to_npz
 from sklearn.metrics import r2_score
 import argparse
 plt.rcParams.update({
@@ -298,12 +301,82 @@ if __name__ == "__main__" :
     material_model_name = "isihara"
     disp_noise = 0.00
     load_noise = 0.00
-    target_load = 6.0
-    asym_factor = 1.0
+    target_load = 10.0
+    asym_factor = 0.9
 
     # validation_load_step_indices = args.validation_load_step_indices
-    num_steps = 20
+    num_steps = 21
     # load result 
+
+
+    gmsh.initialize()
+    model = gmsh.model.occ
+
+    # 1. Parameters
+    L_x, L_y = 1.0, 1.0
+    R_hole = 0.1
+    mesh_size_far = 0.05  # Coarse at corners
+    mesh_size_near = 0.02  # Very dense at circle
+
+    # 2. Geometry
+    rect = model.addRectangle(0.0, 0.0, 0.0, L_x, L_y)
+    circle = model.addDisk(0.0, 0.0, 0.0, R_hole, R_hole)
+
+    # Boolean Cut
+    # returns [(2, tag)], [ [(2, tag)], ... ]
+    out_tags, _ = model.cut([(2, rect)], [(2, circle)])
+    # out_tags = rect
+    model.synchronize()
+
+    # 3. Automatic Hole Identification
+    # We get all curves (dim=1) and find the one that is part of the hole
+    all_curves = gmsh.model.getEntities(1)
+    hole_curve_tag = []
+
+    for dim, tag in all_curves:
+        # Get the bounding box of the curve
+        min_x, min_y, _, max_x, max_y, _ = gmsh.model.getBoundingBox(dim, tag)
+        # If the curve is within the hole area, it's our target
+        if max_x <= R_hole + 1e-6 and min_x >= -R_hole - 1e-6:
+            if max_y <= R_hole + 1e-6 and min_y >= -R_hole - 1e-6:
+                hole_curve_tag.append(tag)
+
+    # 4. Define Distance Field on the Hole
+    gmsh.model.mesh.field.add("Distance", 1)
+    gmsh.model.mesh.field.setNumbers(1, "CurvesList", hole_curve_tag)
+
+    # 5. Define Threshold (The "Halo" Effect)
+    gmsh.model.mesh.field.add("Threshold", 2)
+    gmsh.model.mesh.field.setNumber(2, "InField", 1)
+    gmsh.model.mesh.field.setNumber(2, "SizeMin", mesh_size_near)
+    gmsh.model.mesh.field.setNumber(2, "SizeMax", mesh_size_far)
+    gmsh.model.mesh.field.setNumber(2, "DistMin", 0.02) # Fineness stays constant for this distance
+    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.75) # Gradually becomes coarse until this distance
+
+    gmsh.model.mesh.field.setAsBackgroundMesh(2)
+
+    # 6. Strict Mesh Options
+    # This prevents the outer boundary from dictating the mesh size
+    gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+
+    # 7. Physical Groups & Generate
+    surf_tag = out_tags[0][1]
+    gmsh.model.addPhysicalGroup(2, [surf_tag], 1, name="domain")
+
+    gmsh.model.mesh.generate(2)
+    gmsh.write("mesh/training_mesh.msh")
+
+    # Launch GUI to verif
+
+    gmsh.finalize()
+
+    # 8. Read into DOLFINx
+    mesh_ = read_from_msh("mesh/training_mesh.msh", MPI.COMM_WORLD, 0, 2)
+    convert_msh_to_npz("mesh/training_mesh.msh", "mesh/training_mesh.npz")
+    domain = mesh_.mesh
+    print(domain.geometry.dim)
 
 
     save_path = Path("raw_dataset_jax")
@@ -340,7 +413,7 @@ if __name__ == "__main__" :
             return first_PK_stress
         
     # Specify mesh-related information (first-order hexahedron element).
-    mesh_data = jnp.load("mesh/mesh.npz")
+    mesh_data = jnp.load("mesh/training_mesh.npz")
     node_coords = mesh_data["node_coords"][:, :2]
     cells = mesh_data["cells"]
     ele_type = 'TRI3'
@@ -410,13 +483,25 @@ if __name__ == "__main__" :
                             location_fns = [right,top],
                             material_model_piola_stress=true_piola_stress_func)
 
+    # petsc_options = {
+    #     "snes_type": "newtonls",
+    #     "snes_linesearch_type": "bt", 
+    #     "ksp_type": "gmres",
+    #     "pc_type": "hypre",
+    #     "ksp_rtol": 1e-5,  # Force higher accuracy in the linear solve
+    #     "ksp_atol": 1e-8,
+    # }
     petsc_options = {
         "snes_type": "newtonls",
-        "snes_linesearch_type": "bt", 
-        "ksp_type": "gmres",
-        "pc_type": "hypre",
-        "ksp_rtol": 1e-5,  # Force higher accuracy in the linear solve
-        "ksp_atol": 1e-8,
+        "snes_linesearch_type": "bt",
+        "snes_monitor": None,
+        "snes_atol": 1e-10,
+        "snes_rtol": 1e-10,
+        "snes_stol": 1e-10,
+        "snes_max_it": 50,
+        "ksp_type": "preonly",
+        "pc_type": "lu",
+        "pc_factor_mat_solver_type": "mumps",
     }
     key = jax.random.PRNGKey(42)
     # asym_factor = 0.95

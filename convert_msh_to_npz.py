@@ -6,7 +6,7 @@ from mpi4py import MPI
 def convert_msh_to_npz(msh_filename, npz_filename):
     # Read the mesh file
     # mesh = meshio.read(msh_filename)
-    mesh_ = read_from_msh("mesh.msh", MPI.COMM_WORLD, 0, 2)
+    mesh_ = read_from_msh(msh_filename, MPI.COMM_WORLD, 0, 2)
     domain = mesh_.mesh
     mesh_pos = domain.geometry.x
     cells = domain.topology.connectivity(domain.topology.dim, 0).array.reshape(-1, 3)
@@ -29,4 +29,5 @@ def convert_msh_to_npz(msh_filename, npz_filename):
     print(f"Successfully converted {msh_filename} to {npz_filename}")
 
 # Usage
-convert_msh_to_npz("mesh.msh", "mesh/mesh.npz")
+if __name__ == "__main__" :
+    convert_msh_to_npz("mesh.msh", "mesh/mesh.npz")
