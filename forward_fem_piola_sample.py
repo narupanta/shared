@@ -218,7 +218,7 @@ if __name__ == "__main__" :
     load_noise = float(dataset_params[3])
     disp_noise = float(dataset_params[2])
     material_model_name = dataset_params[1]
-
+    print(case_name)
 
     save_path = analysis_dir / case_name
     save_path.mkdir(parents=True, exist_ok=True)
@@ -384,6 +384,11 @@ if __name__ == "__main__" :
         return u_array
 
     u_true = solve_fem(problem_true, petsc_options, loads_noisy)
+
+    if not os.path.exists(os.path.join(save_path, "gt")):
+        os.makedirs(os.path.join(save_path, "gt"))
+    np.savez_compressed(os.path.join(save_path, f"gt/u_gt.npz"), u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
+
     u_pred_samples = []
 
 

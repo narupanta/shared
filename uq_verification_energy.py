@@ -502,7 +502,7 @@ if __name__ == "__main__" :
     dev_val, vol_val = jax.vmap(transform_input_features)(I_obs_all_val_flat)
     # load result 
     analysis_dir = Path("direct_psi_uq_analysis") 
-    extraction_result_dir = Path("selected_model") 
+    extraction_result_dir = Path("saved_model") 
     save_path = analysis_dir / case_name
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
