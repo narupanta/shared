@@ -1,4 +1,10 @@
 #!/bin/bash
+#SBATCH --partition=gpu_teaching
+#SBATCH --nodes=1
+#SBATCH --time=20:00:00
+#SBATCH --job-name=gen-train-val
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:ampere
 
 # Configuration
 YAML_FILE="train_val_config.yaml"
@@ -54,6 +60,10 @@ MODEL_PATH=$(python3 train_unsupervised.py \
     --is_fixed_reaction_force_noise "$FIXED_NOISE" \
     --is_include_prior_mean "$PRIOR_MEAN" \
     --n_iterations "$ITERS" \
+    --disp_noise "$D_NOISE" \
+    --load_noise "$L_NOISE" \
+    --target_load_true_top "$TOP_LOAD" \
+    --asym_factor "$ASYM" \
     --learning_rate "$LR" | tail -n 1)
 
 if [ $? -ne 0 ]; then echo "Training failed"; exit 1; fi
@@ -68,13 +78,13 @@ export OMP_NUM_THREADS=4
 # 2. Start Validation in the background
 python3 forward_fem_piola_sample.py \
     --model_path $MODEL_PATH \
-    --n_sample "$VAL_SAMPLES" >> ffp.log 2>&1 &
+    --n_sample "$VAL_SAMPLES" &
 PID_VAL=$!  # Save the Process ID of the validation task
 
 # 3. Start Analysis in the background
 python3 forward_fem_piola_traction_sample.py \
     --model_path $MODEL_PATH \
-    --n_sample "$VAL_SAMPLES"  >> ffpt.log 2>&1 &
+    --n_sample "$VAL_SAMPLES" &
 PID_ANA=$!  # Save the Process ID of the analysis task
 
 echo "Processes started: Validation (PID: $PID_VAL) and Analysis (PID: $PID_ANA)"

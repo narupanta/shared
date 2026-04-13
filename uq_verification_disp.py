@@ -383,6 +383,7 @@ if __name__ == "__main__" :
     # read file from coverage/{mat_model}_{disp_noise}_{load_noise}
     # material_model_name = "isihara"
     validation_load_step_indices = args.validation_load_step_indices
+    print(validation_load_step_indices)
     n_sample = args.n_sample
     model_path = args.model_path
 
@@ -391,7 +392,7 @@ if __name__ == "__main__" :
     true_data_dir = Path("precomputed_vfm")
 
     analysis_dir = Path("coverage_test") 
-    extraction_result_dir = Path("selected_model") 
+    extraction_result_dir = Path("saved_model") 
     case_name = args.model_path
     precomputed_vfm_name = f"{case_name.split("_")[1]}_{case_name.split("_")[2]}_{case_name.split('_')[3]}_{case_name.split('_')[4]}_{case_name.split('_')[5]}"
 
@@ -403,7 +404,9 @@ if __name__ == "__main__" :
     # gt_samples_dir_name = analysis_dir / f"{material_model_name}_gt_{load_noise}"
     files = os.listdir(pred_dir_name / "piola_samples")
     pt_files = os.listdir(pred_dir_name / "piola_traction_samples")
-    true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
+    # true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
+    true_data = np.load(pred_dir_name / "gt" / "u_gt.npz")
+
     u_true = true_data["u"][step]
 
     u_pred_piola_samples = [] 
@@ -454,7 +457,8 @@ if __name__ == "__main__" :
     plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
     # plot_disp_r2_coverage(u_true, u_pred_samples.mean(axis=0), u_pred_samples.std(axis=0), save_path)
 
-    true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
+    # true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
+    # true_data = np.load(pred_dir_name / "gt" / "u_gt.npz")
     u_true_val = true_data["u"][validation_load_step_indices]
 
     u_pred_piola_samples_val = [] 
@@ -477,15 +481,15 @@ if __name__ == "__main__" :
 
     u_pt_lower_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.025, axis=0)
     u_pt_upper_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.975, axis=0)
-    u_pt_median = np.quantile(u_pred_piola_traction_samples_val_flat, 0.5, axis=0)
-    plot_disp_r2_coverage(u_true_val_flat, u_pt_median, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix ="_piola_traction")
+    u_pt_mean = np.mean(u_pred_piola_traction_samples_val_flat, axis=0)
+
+    plot_disp_r2_coverage(u_true_val_flat, u_pt_mean, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix ="_piola_traction")
 
 
     u_p_lower_bound = np.quantile(u_pred_piola_samples_val_flat, 0.025, axis=0)
     u_p_upper_bound = np.quantile(u_pred_piola_samples_val_flat, 0.975, axis=0)
-    u_p_median = np.quantile(u_pred_piola_samples_val_flat, 0.5, axis=0)
-    plot_disp_r2_coverage(u_true_val_flat, u_p_median, u_p_lower_bound, u_p_upper_bound, save_path, suffix ="_piola")
-
+    u_p_mean = np.mean(u_pred_piola_samples_val_flat, axis=0)
+    plot_disp_r2_coverage(u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, suffix ="_piola")
     # for n_idx in node_indices :
     #     plot_comprehensive_analysis(u_true, u_pred_samples, node_type, n_idx, save_path)
     pass

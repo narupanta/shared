@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument('--material_model_name', type=str, default="isihara")
     parser.add_argument('--disp_noise', type=float, default=0.000)
     parser.add_argument('--load_noise', type=float, default=0.01)
-    parser.add_argument('--target_load_true_top', type=int, default=8)
+    parser.add_argument('--target_load_true_top', type=float, default=8.0)
     parser.add_argument('--asym_factor', type=float, default=0.975)
 
     # Training Config
