@@ -118,7 +118,8 @@ class SparseHyperelasticityGP:
     def vol_mean_func(self, v):
         p = self.params
         j_minus_1 = v[0] - 1
-        return (p.k * j_minus_1**2 + p.q * jnp.log(v[0])**2) * self.is_include_prior_mean
+        return (p.k * j_minus_1**2) * self.is_include_prior_mean
+        # return (p.k * j_minus_1**2 + p.q * jnp.log(v[0])**2) * self.is_include_prior_mean
 
     # --- Pathwise Sampling Logic ---
 
@@ -198,6 +199,9 @@ class SparseHyperelasticityGP:
         # constraint every entry to positive
         cov_mat_dev = jnp.maximum(cov_mat_dev, 1e-8)
         cov_mat_vol = jnp.maximum(cov_mat_vol, 1e-8)
+        check = jnp.diag(cov_mat_dev + cov_mat_vol)
+        sqrt_check = jnp.sqrt(check)
+
         return jnp.diag(cov_mat_dev + cov_mat_vol)
     def dev_gp_mean(self, d) :
         mean_prior = jax.vmap(self.dev_mean_func)(d)

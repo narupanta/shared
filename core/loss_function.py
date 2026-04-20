@@ -9,6 +9,8 @@ from .dataclass import GPRawParams, GPParams
 def total_stochastic_loss(p, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, cells, n_nodes, f_neu_nodes, node_type, dNdX, dA, key: jnp.array, n_s) :
     model.params = model.load_params(p)
     model.gpweight = model.precompute_weights(p)
+    sigma_fix_x = model.params.sigma_fix_x
+    sigma_fix_y = model.params.sigma_fix_y
 
     main_key = jr.split(key, n_s + 1)
     subkey = main_key[1:]
@@ -20,17 +22,17 @@ def total_stochastic_loss(p, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, 
     piola2x2_cells = piola_sampling(f3x3, subkey)
 
     # vmapped_ell
-    vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, 0, None, None))
-    ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(model.params, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
+    vmapped_ell = jax.vmap(ell, in_axes=(None, 0, 0, None, None, None, None, 0, None, None))
+    ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(model.params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
     kl_div = model.kl_divergence()
     total_loss = -jnp.mean(ell_) + kl_div
     return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood), jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss))
 
-def ell(p, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA) :
+def ell(p, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA) :
     sigma_free_x = p.sigma_free_x
     sigma_free_y = p.sigma_free_y
-    sigma_fix_x = p.sigma_fix_x
-    sigma_fix_y = p.sigma_fix_y
+    # sigma_fix_x = p.sigma_fix_x
+    # sigma_fix_y = p.sigma_fix_y
 
     free_loss, fix_loss = jax.vmap(vfm_loss, in_axes=(None, None, 0, None, 0, None, None))(cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
 

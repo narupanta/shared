@@ -104,8 +104,8 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
         ax.plot(gamma, psi_true[i], 'k--', lw=1.5, label="True", zorder=5)
         ax.plot(gamma, psi_samples[:, i, :].T, color="lightblue", lw=0.6, alpha=0.15, zorder=1)
         ax.plot(gamma, psi_means[i], color="blue", lw=1.8, label="GP Mean", zorder=3)
-        ax.fill_between(gamma, psi_means[i] - 1.96*jnp.sqrt(psi_vars[i]), 
-                        psi_means[i] + 1.96*jnp.sqrt(psi_vars[i]), color="blue", alpha=0.1)
+        ax.fill_between(gamma, psi_means[i] - 1.96*jnp.sqrt(psi_vars[i] + 1e-8), 
+                        psi_means[i] + 1.96*jnp.sqrt(psi_vars[i] + 1e-8), color="blue", alpha=0.1)
         
         ax.set_title(name)
         ax.set_xlabel(r"$\gamma$"); ax.set_ylabel(r"$\Psi$")
@@ -475,8 +475,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
 
     # Dataset & Model Config
-    parser.add_argument('--model_path', type=str, default="20260411T115941_isihara_0.0_0.01_8_0.975_5_40.0_1_0")
-    parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[2, 4, 6, 8])
+    parser.add_argument('--model_path', type=str, default="20260418T133514_isihara_0.0_0.01_8.0_0.9_5_50.0_1_0")
+    parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[9])
     parser.add_argument('--n_sample', type=int, default=128)
 
 

@@ -8,6 +8,18 @@ import gmsh
 from mpi4py import MPI
 from dolfinx import fem, mesh, plot
 from petsc4py import PETSc
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.tri as tri
+import os
+import jax
+import jax.numpy as jnp
+import argparse
+from core.utils import deformation_gradient_element, transformation_jacobian
+from core.loss_function import neumann_cell_force
+from pathlib import Path
+from convert_msh_to_npz import convert_msh_to_npz
+
 
 def facets_to_nodes(domain, facet_ids):
     fdim = domain.topology.dim - 1
@@ -28,7 +40,7 @@ def FEM_solve(material_model_name, loads) :
     # 1. Parameters
     L_x, L_y = 1.0, 1.0
     R_hole = 0.1
-    mesh_size_far = 0.08     # Coarse at corners
+    mesh_size_far = 0.02     # Coarse at corners
     mesh_size_near = 0.02  # Very dense at circle
 
     # 2. Geometry
@@ -143,14 +155,6 @@ def FEM_solve(material_model_name, loads) :
     bottom_dofs_xy = fem.locate_dofs_topological(V, facet_tag.dim, facet_tag.find(2))
     right_dofs = fem.locate_dofs_topological(V.sub(0), facet_tag.dim, facet_tag.find(3))
     top_dofs = fem.locate_dofs_topological(V.sub(1), facet_tag.dim, facet_tag.find(4))
-    # bcs = [
-    #     fem.dirichletbc(zero, left_dofs, V.sub(0)), 
-    #     fem.dirichletbc(zero, bottom_dofs, V.sub(1)),
-    #     # fem.dirichletbc(u_bc, bottom_dofs_xy, V),
-    #     # fem.dirichletbc(control_ux, right_dofs, V.sub(0)),
-    #     # fem.dirichletbc(control_uy, top_dofs, V.sub(1))
-    #     ]
-
 
     # Next, we define the body force on the reference configuration (`B`), and nominal (first Piola-Kirchhoff) traction (`T`).
 
@@ -164,8 +168,8 @@ def FEM_solve(material_model_name, loads) :
     bcs = [
         fem.dirichletbc(zero, left_dofs, V.sub(0)), 
         fem.dirichletbc(zero, bottom_dofs, V.sub(1)),
-        # fem.dirichletbc(top_dis, top_dofs, V.sub(1)), 
-        # fem.dirichletbc(right_dis, right_dofs, V.sub(0)),
+        fem.dirichletbc(top_dis, top_dofs, V.sub(1)), 
+        fem.dirichletbc(right_dis, right_dofs, V.sub(0)),
         ]
     
     v = ufl.TestFunction(V)
@@ -221,7 +225,7 @@ def FEM_solve(material_model_name, loads) :
     # Define the residual of the equation (we want to find u such that residual(u) = 0)
 
     residual = (
-        ufl.inner(grad_3D(v), P) * dx - ufl.inner(v, T_right) * ds(3) - ufl.inner(v, T_top) * ds(4)
+        ufl.inner(grad_3D(v), P) * dx
         # ufl.inner(grad_3D(v), P) * dx - ufl.inner(v, T_top) * ds(4)
 
     )
@@ -286,16 +290,16 @@ def FEM_solve(material_model_name, loads) :
     loads = []
     # asymetric_factor = 0.95
     for i, n in enumerate(load_steps):
-        T_right.value[0] = n[0]
-        T_top.value[1] = n[1]
-        # top_dis.value = n
-        # right_dis.value = (n/2.0)
-        # bcs_t = [
-        #     fem.dirichletbc(zero, left_dofs, V.sub(0)), 
-        #     fem.dirichletbc(zero, bottom_dofs, V.sub(1)),
-        #     fem.dirichletbc(top_dis, top_dofs, V.sub(1)), 
-        #     fem.dirichletbc(right_dis, right_dofs, V.sub(0)),]
-        # problem.bcs = bcs_t  
+        # T_right.value[0] = n[0]
+        # T_top.value[1] = n[1]
+        top_dis.value = n[1]
+        right_dis.value = n[0]
+        bcs_t = [
+            fem.dirichletbc(zero, left_dofs, V.sub(0)), 
+            fem.dirichletbc(zero, bottom_dofs, V.sub(1)),
+            fem.dirichletbc(top_dis, top_dofs, V.sub(1)), 
+            fem.dirichletbc(right_dis, right_dofs, V.sub(0)),]
+        problem.bcs = bcs_t  
 
         problem.solve()
 
@@ -339,3 +343,192 @@ def FEM_solve(material_model_name, loads) :
                    bottom_ys = bottom_y,
                    reactions = reactions,
                    loads = load_steps)
+
+
+def plot_dataset_viz(data, material_model_name, disp_noise_level, load_noise_level, save_path) :
+    # --- 1. Setup Dummy Data (Simulating FEM Output) ---
+    # Create a simple 2x2 rectangular mesh with 4 nodes and 2 triangular elements
+    # Node coordinates (Undeformed mesh_pos)
+    mesh_pos = data["mesh_pos"]
+
+    # Element connectivity (cells: indices of nodes forming each triangle)
+    cells = data["cells"]
+
+    # Displacement components (ux and uy) at each node
+    # This simulates a simple shear/tensile deformation
+    percent_noise = 0.000
+    ux = np.array(data["u"][-1, :, 0])
+    ux[(data["node_type"][:, 1] != 1)] += np.random.normal(0, percent_noise, ux.shape)[(data["node_type"][:, 1] != 1)]
+    uy = np.array(data["u"][-1, :, 1])
+    uy[(data["node_type"][:, 2] != 1)] += np.random.normal(0, percent_noise, uy.shape)[(data["node_type"][:, 2] != 1)]
+
+    # Combine components into the full displacement vector u
+    u = np.column_stack((ux, uy))
+    # u[data["node_type"] == 0] = u[data["node_type"] == 0] + np.random.normal(0, 0.0001, u.shape)[data["node_type"] == 0]
+    # Calculate the deformed coordinates (world_pos)
+    world_pos = mesh_pos[:, :2] + u
+
+    # --- 2. Initialize Triangulation Objects ---
+    # We need the x and y coordinates from the undeformed mesh
+    x = mesh_pos[:, 0]
+    y = mesh_pos[:, 1]
+
+    # Create the Matplotlib Triangulation object
+    # This object stores the connectivity (cells) and coordinates (x, y)
+    triangulation = tri.Triangulation(x, y, cells)
+
+    # --- 3. Plotting ---
+
+    # Set up the figure with 1 row and 3 columns for the plots
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle('Finite Element Visualization (Undeformed vs. Deformed)', fontsize=16)
+
+    # --- Subplot 1: Plotting UX (Horizontal Displacement) ---
+    ax1 = axes[0]
+    # tripcolor uses the triangulation to color the triangles based on the nodal value
+    # `facecolors` uses the average of the three nodal values per triangle for coloring
+    tpc1 = ax1.tripcolor(triangulation, ux, cmap='viridis', edgecolors='k', linewidth=0.5)
+    fig.colorbar(tpc1, ax=ax1, label='$u_x$ Displacement')
+    # ax1.scatter(mesh_pos[data["node_type"] == 5, 0], mesh_pos[node_type == 5, 1])
+    ax1.set_title('Color Plot: $u_x$ (Horizontal Displacement)')
+    ax1.set_xlabel('X Position')
+    ax1.set_ylabel('Y Position')
+    ax1.set_aspect('equal')
+
+    # --- Subplot 2: Plotting UY (Vertical Displacement) ---
+    ax2 = axes[1]
+    tpc2 = ax2.tripcolor(triangulation, uy, cmap='magma', edgecolors='k', linewidth=0.01)
+    fig.colorbar(tpc2, ax=ax2, label='$u_y$ Displacement')
+
+    ax2.set_title('Color Plot: $u_y$ (Vertical Displacement)')
+    ax2.set_xlabel('X Position')
+    ax2.set_aspect('equal')
+
+    # --- Subplot 3: Plotting Deformed Domain ---
+    ax3 = axes[2]
+
+    # Plot the outline of the UNDEFORMED mesh for reference (dashed gray)
+    ax3.triplot(triangulation, 'r-', alpha=0.5, linewidth=0.5, label='Undeformed Mesh')
+
+    # Plot the DEFORMED mesh. We must manually create a new triangulation
+    # object using the deformed coordinates (world_pos) but the SAME connectivity (cells).
+    x_def = world_pos[:, 0]
+    y_def = world_pos[:, 1]
+    tri_def = tri.Triangulation(x_def, y_def, cells)
+
+    # Plot the deformed mesh (solid blue lines)
+    ax3.triplot(tri_def, 'b-', linewidth=0.5, label='Deformed Mesh')
+
+    ax3.set_title('Deformed Domain')
+    ax3.set_xlabel('X Position')
+    ax3.legend()
+    ax3.set_aspect('equal')
+
+    # Adjust layout to prevent overlaps
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # create save_path dir if not exist
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+   
+    plt.savefig(save_path + f"/{material_model_name}_{disp_noise_level}_{load_noise_level}.png", dpi=300, bbox_inches='tight')
+
+if __name__ == '__main__' :
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default="isihara")
+    parser.add_argument('--disp_noise', type=float, default=0.0)
+    parser.add_argument('--load_noise', type=float, default=0.03)
+    parser.add_argument('--target_top', type=float, default=2.0)
+    parser.add_argument('--asym', type=float, default=0.2)
+    parser.add_argument('--n_steps', type=int, default=10)
+    args = parser.parse_args()
+
+    # Assign from args
+    material_model_name = args.model
+    disp_noise_level = args.disp_noise
+    load_noise_level = args.load_noise
+    asymetric_factor = args.asym
+    n_loadsteps = args.n_steps
+    target_load_top_true = args.target_top
+
+
+    target_load_right_true = args.target_top * asymetric_factor
+    target_load_true = np.array([target_load_right_true, target_load_top_true])
+    load_noise_std = load_noise_level * target_load_true 
+    target_load_noisy = np.random.normal(target_load_true, load_noise_std)
+
+    noisy_top_load = np.linspace(0, target_load_noisy[1], n_loadsteps).reshape(-1,1)
+    noisy_right_load = np.linspace(0, target_load_noisy[0], n_loadsteps).reshape(-1,1)
+    noisy_load = np.concat([noisy_right_load, noisy_top_load], axis = 1)
+
+
+    top_load = np.linspace(0, target_load_top_true, n_loadsteps).reshape(-1,1)
+    right_load = np.linspace(0, target_load_right_true, n_loadsteps).reshape(-1,1)
+    load_true = np.concat([right_load, top_load], axis = 1)
+
+    data = FEM_solve(material_model_name, load_true)
+
+    save_raw_dataset_dir = f"raw_dataset/{material_model_name}_{disp_noise_level}_{load_noise_level}_{target_load_top_true}_{asymetric_factor}_d"
+    if not os.path.exists(save_raw_dataset_dir):
+        os.makedirs(save_raw_dataset_dir)
+    for step in data["u"].keys() :
+        # data_ = dict(mesh_pos = data["mesh_pos"], cells = data["cells"], u = data["u"][step], node_type = data["node_type"], reaction = data["reactions"][step], load = data["loads"][step], load_noise_std = load_noise_std)
+        data_ = dict(mesh_pos = data["mesh_pos"], cells = data["cells"], u = data["u"][step], node_type = data["node_type"], reaction = data["reactions"][step], load = noisy_load[step], load_noise_std = load_noise_std)
+        
+        np.savez_compressed(f"{save_raw_dataset_dir}/disp_{step:02d}.npz", **data_)
+
+    random_key = jax.random.PRNGKey(0)
+
+    data_dir = Path(f"raw_dataset/{material_model_name}_{disp_noise_level}_{load_noise_level}_{target_load_top_true}_{asymetric_factor}_d")
+
+    # find the first .npz file in that directory
+    npz_files = list(data_dir.glob("*.npz"))
+    if not npz_files:
+        raise FileNotFoundError(f"No .npz file found in {data_dir}")
+    
+    data = [dict(jnp.load(p)) for p in npz_files]
+    F_all = []
+    u_all = []
+    load_all = []
+    f_neu_all = []
+
+    
+    for d in data :
+        random_key, subkey_disp, subkey_load = jax.random.split(random_key, 3)
+
+        u = d["u"]
+        # disp noise needed to be added here, so we can propagate noise from u to F
+        u_noise = jax.random.normal(subkey_disp, u.shape) * disp_noise_level
+        free_nodes = (d["node_type"][:, 1] != 1) & (d["node_type"][:, 2] != 1)
+        u_noise = u_noise.at[free_nodes].set(0.0)
+        u += u_noise
+
+        mesh_pos = d["mesh_pos"][:, :2]
+        cells = d["cells"]
+        node_type = d["node_type"]
+        load = d["load"]
+
+        m_cells = mesh_pos[cells]
+        u_cells = u[cells]
+        node_type_cells = node_type[cells]
+
+        F, dNdX = deformation_gradient_element(m_cells, u_cells)
+        dA = jnp.linalg.det(transformation_jacobian(m_cells)) / 2 
+        f_neu_cells = jax.vmap(neumann_cell_force, in_axes=(0, 0, None, None))(m_cells, node_type_cells, load[0], load[1])
+        f_neu = jnp.zeros((mesh_pos.shape[0], 2)).at[cells].add(f_neu_cells)
+
+        F_all.append(F)
+        u_all.append(u)
+        load_all.append(load)
+        f_neu_all.append(f_neu)
+
+    u_array = jnp.stack(u_all)  
+    F_array = jnp.stack(F_all)
+    load_array = jnp.stack(load_all)
+    f_neu_array = jnp.stack(f_neu_all)
+
+    # save true psi/piola function to facilitate the plot
+
+    # save all as npz in /precomputed_vfm/{material_model}_{disp_noise}_{load_noise}/
+    precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std)
+    np.savez_compressed(f"precomputed_vfm/{material_model_name}_{disp_noise_level}_{load_noise_level}_{target_load_top_true}_{asymetric_factor}.npz", **precomputed_vfm)
+    plot_dataset_viz(precomputed_vfm, material_model_name, disp_noise_level, load_noise_level, "dataset_viz/")

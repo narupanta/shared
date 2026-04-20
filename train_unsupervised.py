@@ -36,12 +36,12 @@ def parse_args():
     parser.add_argument('--disp_noise', type=float, default=0.000)
     parser.add_argument('--load_noise', type=float, default=0.01)
     parser.add_argument('--target_load_true_top', type=float, default=8.0)
-    parser.add_argument('--asym_factor', type=float, default=0.975)
+    parser.add_argument('--asym_factor', type=float, default=0.9)
 
     # Training Config
     parser.add_argument('--number_of_mci_sampling', type=int, default=3)
     parser.add_argument('--n_ip', type=int, default=5)
-    parser.add_argument('--beta', type=float, default=40.0)
+    parser.add_argument('--beta', type=float, default=50.0)
     
     # Booleans (using 0/1 as integers is often safer in shell scripts)
     parser.add_argument('--is_fixed_reaction_force_noise', type=int, default=0)
@@ -49,9 +49,9 @@ def parse_args():
 
     # Handling the List [0, 5, 9]
     # 'nargs="+"' allows you to pass multiple space-separated integers
-    parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[0, 5, 9])
-    parser.add_argument('--n_iterations', type=int)
-    parser.add_argument('--learning_rate', type=float)
+    parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
+    parser.add_argument('--n_iterations', type=int, default=1000)
+    parser.add_argument('--learning_rate', type=float, default=0.01)
 
     return parser.parse_args()
 
@@ -130,7 +130,7 @@ if __name__ == "__main__" :
     dA = prep_data["dA"]
     cells = prep_data["cells"]
     load_noise_std = prep_data["load_noise_std"]
-
+    load_noise_std_steps = prep_data["load_noise_std_steps"][train_load_steps_indices] 
 
     true_mat_model = get_material(material_model_name)
     psi_true_func = lambda f: true_mat_model.psi(f)
@@ -180,8 +180,8 @@ if __name__ == "__main__" :
             # Noise parameters
             log_sigma_free_x=jax.random.normal(k1, ()),
             log_sigma_free_y=jax.random.normal(k2, ()),
-            log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std[0]),
-            log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std[1])
+            log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
+            log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1])
             )
     else :
         params = GPRawParams(
@@ -214,8 +214,8 @@ if __name__ == "__main__" :
             # Noise parameters
             log_sigma_free_x=jax.random.normal(k1, ()),
             log_sigma_free_y=jax.random.normal(k2, ()),
-            log_sigma_fix_x=jax.random.normal(k3, ()),
-            log_sigma_fix_y=jax.random.normal(k4, ())
+            log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0])),
+            log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0]))
         )
     
     min_dev = jnp.min(dev_z, axis=0)

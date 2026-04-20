@@ -37,7 +37,7 @@ def FEM_solve(material_model_name, loads) :
     # 1. Parameters
     L_x, L_y = 1.0, 1.0
     R_hole = 0.1
-    mesh_size_far = 0.05  # Coarse at corners
+    mesh_size_far = 0.08  # Coarse at corners
     mesh_size_near = 0.02  # Very dense at circle
 
     # 2. Geometry
@@ -73,7 +73,7 @@ def FEM_solve(material_model_name, loads) :
     gmsh.model.mesh.field.setNumber(2, "SizeMin", mesh_size_near)
     gmsh.model.mesh.field.setNumber(2, "SizeMax", mesh_size_far)
     gmsh.model.mesh.field.setNumber(2, "DistMin", 0.02) # Fineness stays constant for this distance
-    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.75) # Gradually becomes coarse until this distance
+    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.36) # Gradually becomes coarse until this distance
 
     gmsh.model.mesh.field.setAsBackgroundMesh(2)
 
@@ -423,7 +423,7 @@ if __name__ == '__main__' :
     target_load_top_true = args.target_top
 
 
-    target_load_right_true = 9.0
+    target_load_right_true = args.target_top * asymetric_factor
     target_load_true = np.array([target_load_right_true, target_load_top_true])
     load_noise_std = load_noise_level * target_load_true 
     target_load_noisy = np.random.normal(target_load_true, load_noise_std)
@@ -432,7 +432,7 @@ if __name__ == '__main__' :
     noisy_right_load = np.linspace(0, target_load_noisy[0], n_loadsteps).reshape(-1,1)
     noisy_load = np.concat([noisy_right_load, noisy_top_load], axis = 1)
 
-
+    load_noise_std_steps = load_noise_std * np.linspace(0, 1, n_loadsteps).reshape(-1,1)
     top_load = np.linspace(0, target_load_top_true, n_loadsteps).reshape(-1,1)
     right_load = np.linspace(0, target_load_right_true, n_loadsteps).reshape(-1,1)
     load_true = np.concat([right_load, top_load], axis = 1)
@@ -501,6 +501,6 @@ if __name__ == '__main__' :
     # save true psi/piola function to facilitate the plot
 
     # save all as npz in /precomputed_vfm/{material_model}_{disp_noise}_{load_noise}/
-    precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std)
+    precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std, load_noise_std_steps = load_noise_std_steps)
     np.savez_compressed(f"precomputed_vfm/{material_model_name}_{disp_noise_level}_{load_noise_level}_{target_load_top_true}_{asymetric_factor}.npz", **precomputed_vfm)
     plot_dataset_viz(precomputed_vfm, material_model_name, disp_noise_level, load_noise_level, "dataset_viz/")
