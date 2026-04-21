@@ -53,6 +53,7 @@ if [ $? -ne 0 ]; then echo "❌ Step 1 failed"; exit 1; fi
 
 echo "Running Step 2: Training..."
 MODEL_PATH=$(python3 train_unsupervised.py \
+    --material_model_name "$MODEL" \
     --number_of_mci_sampling "$MCI_SAMPLING" \
     --train_load_steps_indices $TRAIN_INDICES \
     --n_ip "$N_IP" \
