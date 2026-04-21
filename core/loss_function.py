@@ -22,8 +22,9 @@ def total_stochastic_loss(p, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, 
     piola2x2_cells = piola_sampling(f3x3, subkey)
 
     # vmapped_ell
-    vmapped_ell = jax.vmap(ell, in_axes=(None, 0, 0, None, None, None, None, 0, None, None))
-    ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(model.params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
+    vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, 0, None, None))
+    steps_ell = jax.vmap(vmapped_ell, in_axes=(None, 0, 0, None, None, None, None, None, None, None))
+    ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = steps_ell(model.params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
     kl_div = model.kl_divergence()
     total_loss = -jnp.mean(ell_) + kl_div
     return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood), jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss))
