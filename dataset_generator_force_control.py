@@ -467,7 +467,8 @@ if __name__ == '__main__' :
     for d in data :
         random_key, subkey_disp, subkey_load = jax.random.split(random_key, 3)
 
-        u = d["u"]
+        u = d["u"] 
+        
         # disp noise needed to be added here, so we can propagate noise from u to F
         u_noise = jax.random.normal(subkey_disp, u.shape) * disp_noise_level
         free_nodes = (d["node_type"][:, 1] != 1) & (d["node_type"][:, 2] != 1)
