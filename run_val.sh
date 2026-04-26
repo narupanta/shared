@@ -1,6 +1,6 @@
 #!/bin/bash
 
-MODEL_PATH=20260420T094116_isihara_0.0001_0.02_8.0_0.9_5_50.0_1_0
+MODEL_PATH=20260410T090545_isihara_0.0_0.01_5_20_1_1
 # VAL_SAMPLES=5
 VAL_INDICES="9"
 # 2. Start Validation in the background

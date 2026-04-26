@@ -47,6 +47,10 @@ plt.rcParams.update({
     "text.usetex": False            # Set to True only if you have a full LaTeX install
 })
 
+from core.utils import deformation_gradient_element, transformation_jacobian
+from core.loss_function import neumann_cell_force
+from pathlib import Path
+from convert_msh_to_npz import convert_msh_to_npz
 
 def plot_fem_verification(I1_bar_true, I2_bar_true, J_true,
                           I1_bar_pred, I2_bar_pred, J_pred,
@@ -297,15 +301,24 @@ def parse_args():
 
 
 if __name__ == "__main__" :
-    args = parse_args()
-    material_model_name = "isihara"
-    disp_noise = 0.00
-    load_noise = 0.00
-    target_load = 10.0
-    asym_factor = 0.9
+    # args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default="isihara")
+    parser.add_argument('--disp_noise', type=float, default=0.0)
+    parser.add_argument('--load_noise', type=float, default=0.03)
+    parser.add_argument('--target_top', type=float, default=10.0)
+    parser.add_argument('--asym', type=float, default=0.9)
+    parser.add_argument('--n_steps', type=int, default=21)
+    args = parser.parse_args()
+
+    material_model_name = args.model
+    disp_noise = args.disp_noise
+    load_noise = args.load_noise
+    target_load = args.target_top
+    asym_factor = args.asym
 
     # validation_load_step_indices = args.validation_load_step_indices
-    num_steps = 21
+    num_steps = args.n_steps
     # load result 
 
 
@@ -315,7 +328,7 @@ if __name__ == "__main__" :
     # 1. Parameters
     L_x, L_y = 1.0, 1.0
     R_hole = 0.1
-    mesh_size_far = 0.05  # Coarse at corners
+    mesh_size_far = 0.08  # Coarse at corners
     mesh_size_near = 0.02  # Very dense at circle
 
     # 2. Geometry
@@ -351,7 +364,7 @@ if __name__ == "__main__" :
     gmsh.model.mesh.field.setNumber(2, "SizeMin", mesh_size_near)
     gmsh.model.mesh.field.setNumber(2, "SizeMax", mesh_size_far)
     gmsh.model.mesh.field.setNumber(2, "DistMin", 0.02) # Fineness stays constant for this distance
-    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.75) # Gradually becomes coarse until this distance
+    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.36) # Gradually becomes coarse until this distance
 
     gmsh.model.mesh.field.setAsBackgroundMesh(2)
 
@@ -516,6 +529,14 @@ if __name__ == "__main__" :
     noisy_load_right_base = noisy_load_top_base * asym_factor
     # Baseline loads shape: (10, 2)
     loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
+    loads_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1,1)
+    loads_right_true = loads_top_true * asym_factor
+
+    target_load_true = jnp.concat([loads_right_true, loads_top_true], axis=1)
+    load_noise_std = load_noise * target_load_true
+    load_noise_std_steps = load_noise_std * np.linspace(0, 1, num_steps).reshape(-1,1)
+    loads_true = jnp.concat([loads_right_true, loads_top_true], axis=1)
+
 
     def solve_fem(problem, petsc_options, loads) :
         u_list = []
@@ -540,8 +561,72 @@ if __name__ == "__main__" :
         u_array = jnp.stack(u_list, axis=0)  
         return u_array
 
-    u_true = solve_fem(problem_true, petsc_options, loads_noisy)
+    u_true = solve_fem(problem_true, petsc_options, loads_true)
+    save_raw_dataset_dir = f"raw_dataset/{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}"
+    if not os.path.exists(save_raw_dataset_dir):
+        os.makedirs(save_raw_dataset_dir)
+    for step in range(u_true.shape[0]) :
+        # data_ = dict(mesh_pos = data["mesh_pos"], cells = data["cells"], u = data["u"][step], node_type = data["node_type"], reaction = data["reactions"][step], load = data["loads"][step], load_noise_std = load_noise_std)
+        data_ = dict(mesh_pos = node_coords, cells = cells, u = u_true[step], node_type = node_type, load = loads_noisy[step], load_noise_std = load_noise_std)
+        
+        np.savez_compressed(f"{save_raw_dataset_dir}/disp_{step:02d}.npz", **data_)
 
+    random_key = jax.random.PRNGKey(0)
 
+    data_dir = Path(f"raw_dataset/{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}")
+
+    # find the first .npz file in that directory
+    npz_files = list(data_dir.glob("*.npz"))
+    if not npz_files:
+        raise FileNotFoundError(f"No .npz file found in {data_dir}")
+    
+    data = [dict(jnp.load(p)) for p in npz_files]
+    F_all = []
+    u_all = []
+    load_all = []
+    f_neu_all = []
+
+    
+    for d in data :
+        random_key, subkey_disp, subkey_load = jax.random.split(random_key, 3)
+
+        u = d["u"] 
+        
+        # disp noise needed to be added here, so we can propagate noise from u to F
+        u_noise = jax.random.normal(subkey_disp, u.shape) * disp_noise
+        free_nodes = (d["node_type"][:, 1] != 1) & (d["node_type"][:, 2] != 1)
+        u_noise = u_noise.at[free_nodes].set(0.0)
+        u += u_noise
+
+        mesh_pos = d["mesh_pos"][:, :2]
+        cells = d["cells"]
+        node_type = d["node_type"]
+        load = d["load"]
+
+        m_cells = mesh_pos[cells]
+        u_cells = u[cells]
+        node_type_cells = node_type[cells]
+
+        F, dNdX = deformation_gradient_element(m_cells, u_cells)
+        dA = jnp.linalg.det(transformation_jacobian(m_cells)) / 2 
+        f_neu_cells = jax.vmap(neumann_cell_force, in_axes=(0, 0, None, None))(m_cells, node_type_cells, load[0], load[1])
+        f_neu = jnp.zeros((mesh_pos.shape[0], 2)).at[cells].add(f_neu_cells)
+
+        F_all.append(F)
+        u_all.append(u)
+        load_all.append(load)
+        f_neu_all.append(f_neu)
+
+    u_array = jnp.stack(u_all)  
+    F_array = jnp.stack(F_all)
+    load_array = jnp.stack(load_all)
+    f_neu_array = jnp.stack(f_neu_all)
+
+    # save true psi/piola function to facilitate the plot
+
+    # save all as npz in /precomputed_vfm/{material_model}_{disp_noise}_{load_noise}/
+    precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std, load_noise_std_steps = load_noise_std_steps)
+    np.savez_compressed(f"precomputed_vfm/{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz", **precomputed_vfm)
+    
     data = dict(u = u_true, mesh_pos = node_coords, cells = cells, node_type = node_type)
     plot_dataset_viz(data, material_model_name, disp_noise, load_noise, "dataset_viz_jax")

@@ -41,7 +41,15 @@ VAL_SAMPLES=$(get_yaml "['number_samples']")
 echo "--- Starting Pipeline: $MODEL ---"
 
 # 1. Sequential: Data Generation
-python3 dataset_generator_force_control.py \
+# python3 dataset_generator_force_control.py \
+#     --model "$MODEL" \
+#     --disp_noise "$D_NOISE" \
+#     --load_noise "$L_NOISE" \
+#     --target_top "$TOP_LOAD" \
+#     --asym "$ASYM" \
+#     --n_steps "$STEPS"
+
+python3 dataset_generator_force_control_jax.py \
     --model "$MODEL" \
     --disp_noise "$D_NOISE" \
     --load_noise "$L_NOISE" \
