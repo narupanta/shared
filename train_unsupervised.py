@@ -44,12 +44,12 @@ def parse_args():
     parser.add_argument('--beta', type=float, default=50.0)
     
     # Booleans (using 0/1 as integers is often safer in shell scripts)
-    parser.add_argument('--is_fixed_reaction_force_noise', type=int, default=0)
+    parser.add_argument('--is_fixed_reaction_force_noise', type=int, default=1)
     parser.add_argument('--is_include_prior_mean', type=int, default=0)
 
     # Handling the List [0, 5, 9]
     # 'nargs="+"' allows you to pass multiple space-separated integers
-    parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 3, 5, 9])
+    parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
     parser.add_argument('--n_iterations', type=int, default=1000)
     parser.add_argument('--learning_rate', type=float, default=0.01)
 
