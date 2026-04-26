@@ -181,7 +181,7 @@ class MooneyRivlin(BaseMaterialModel):
 
 @register_material("neohookean")
 class NeoHookean(BaseMaterialModel):
-    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
+    def __init__(self, c1=2.5, c2=5.0, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
         self.c1 = c1
         self.c2 = c2

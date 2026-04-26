@@ -334,7 +334,7 @@ if __name__ == "__main__" :
     key = jax.random.PRNGKey(42)
     # asym_factor = 0.95
     # num_load_samples = 32
-    num_steps = 10
+    num_steps = 20
     # loads_top = jnp.linspace(0.0, 10, 10)
     # target_load = 10.0
     noise_std = load_noise * target_load

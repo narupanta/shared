@@ -87,10 +87,6 @@ if __name__ == "__main__" :
     args = parse_args()
 
     # Now use args.variable_name instead of hardcoded values
-    model_name = args.material_model_name
-    indices = args.train_load_steps_indices
-
-
     material_model_name = args.material_model_name
 
     disp_noise = args.disp_noise
@@ -119,7 +115,6 @@ if __name__ == "__main__" :
         raise FileNotFoundError(f"No .npz file found in {data_dir}")
     prep_dataset_dir = data_dir / f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}.npz"
     prep_data = jnp.load(prep_dataset_dir)
-
     f2x2 = prep_data["F"][train_load_steps_indices] 
 
     # Data use in VFM
@@ -254,7 +249,7 @@ if __name__ == "__main__" :
     n_nodes = int(cells.max()) + 1
     # Open once and clear (or just let the loop handle it)
     with open(log_file_path, "w") as f:
-        f.write("Optimization Start\n" + "="*20 + "\n")
+        f.write(f"{train_load_steps_indices}, {material_model_name} \n Optimization Start\n" + "="*20 + "\n")
     # Lists to store history
     steps_history = []
     loss_components_hist = {"total_loss": [],"log_like": [], "kl": [], "phy": []}

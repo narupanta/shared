@@ -6,6 +6,6 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:ampere
 #SBATCH --cpus-per-task=8
-#SBATCH --mail-type=BEGIN,END,FAIL     # Events (NONE, BEGIN, END, FAIL, ALL)
+#SBATCH --mail-type=END,FAIL     # Events (NONE, BEGIN, END, FAIL, ALL)
 #SBATCH --mail-user=n.pantapalin@tu-braunschweig.de
 singularity exec --nv /home/y0113799/container/ma.sif ./run_gen_train_val.sh
