@@ -453,7 +453,8 @@ if __name__ == '__main__' :
     data_dir = Path(f"raw_dataset/{material_model_name}_{disp_noise_level}_{load_noise_level}_{target_load_top_true}_{asymetric_factor}")
 
     # find the first .npz file in that directory
-    npz_files = list(data_dir.glob("*.npz"))
+    npz_files = sorted(list(data_dir.glob("*.npz")))
+    print(npz_files)
     if not npz_files:
         raise FileNotFoundError(f"No .npz file found in {data_dir}")
     

@@ -1,8 +1,8 @@
 #!/bin/bash
 
-MODEL_PATH=20260410T090545_isihara_0.0_0.01_5_20_1_1
+MODEL_PATH=20260426T100826_neohookean_0.0001_0.01_1.6_0.98_5_50.0_1_0
 # VAL_SAMPLES=5
-VAL_INDICES="9"
+VAL_INDICES="2 4 6 8"
 # 2. Start Validation in the background
 python3 uq_verification_disp.py \
     --model_path $MODEL_PATH \

@@ -372,7 +372,7 @@ if __name__ == "__main__" :
         u_array = jnp.stack(u_list, axis=0)  
         return u_array
     
-    num_steps = 10
+    num_steps = 20
     # loads_top = jnp.linspace(0.0, 10, 10)
     noise_std = load_noise * target_load
     target_load_noisy = target_load + noise_std * jax.random.normal(key)
@@ -400,7 +400,7 @@ if __name__ == "__main__" :
         # key_traction = subkey[0]
         # key_piola = subkey[1]
         # num_load_samples = 32
-        num_steps = 10
+        num_steps = 20
         # loads_top = jnp.linspace(0.0, 10, 10)
         noise_std = load_noise * target_load
         target_load_noisy = target_load + noise_std * jax.random.normal(key_traction)
