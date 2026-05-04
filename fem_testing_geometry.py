@@ -11,10 +11,10 @@ from jax_fem.utils import save_sol
 from jax_fem.generate_mesh import box_mesh_gmsh, get_meshio_cell_type, Mesh
 import jax.random as jr 
 jax.config.update("jax_enable_x64", True)
-
+from pathlib import Path
 from core.utils import *
 from core.model import SparseHyperelasticityGP, GPParams, GPRawParams
-from core.loss_function import force_residual_force_controlled
+# from core.loss_function import force_residual_force_controlled
 from core.material_models import get_material
 from core.datasetclass import BenchmarkDataset
 
@@ -177,7 +177,7 @@ if __name__ == "__main__" :
             return first_PK_stress
         
     # Specify mesh-related information (first-order hexahedron element).
-    mesh_data = jnp.load("/home/mmdiscovery/shared/mesh/square_with_holes.npz")
+    mesh_data = jnp.load("mesh/square_with_holes.npz")
     node_coords = mesh_data["node_coords"]
     cells = mesh_data["cells"]
     ele_type = 'TRI3'
@@ -210,32 +210,33 @@ if __name__ == "__main__" :
     node_type[jax.vmap(bottom)(node_coords)] = 2
     node_type[jax.vmap(right)(node_coords)] = 3
     node_type[jax.vmap(top)(node_coords)] = 4
-
-    true_material_model = get_material("isihara")
+    extraction_result_dir = Path("saved_model")
+    case_name = "20260502T215835_isihara_0.0001_0.01_8.0_0.9_5_80.0_1_0"
+    mat_model_name = case_name.split("_")[1]
+    true_material_model = get_material(mat_model_name)
     true_piola_stress_func = lambda f : true_material_model.P(fto3x3(f))[:2, :2]
-    model_path = "/home/mmdiscovery/shared/selected_model/Isihara/" # Replace with the actual path to your saved model
-
-    with open(os.path.join(model_path, "best_params.npy"), "rb") as f:
-        best_params = jnp.load(f, allow_pickle=True).item()
-
-    with open(os.path.join(model_path, "I_z.npy"), "rb") as f:
-        I_z = jnp.load(f)
-    with open(os.path.join(model_path, "I_obs_all.npy"), "rb") as f:
-        I_obs_all = jnp.load(f)
-    best_raw_params = GPRawParams(**best_params)
-
+    # model_path = f"/home/mmdiscovery/shared/saved_model/{case_name}" # Replace with the actual path to your saved model
+    I_obs_all = np.load(extraction_result_dir / case_name / "I_obs_all.npy")
+    I_z = np.load(extraction_result_dir / case_name / "I_z.npy")
     dev_z = I_z[:, :2]
     vol_z = I_z[:, 2:]
-    min_dev = calculate_min_ls(dev_z)
-    min_vol = calculate_min_ls(vol_z)
+    min_dev = jnp.min(dev_z, axis=0)
+    min_vol = jnp.min(vol_z, axis=0)
+    max_dev = jnp.max(dev_z, axis=0)
+    max_vol = jnp.max(vol_z, axis=0)
 
-    learned_gp = SparseHyperelasticityGP(best_raw_params, I_z, min_dev, min_vol)
+    best_raw_params = np.load(extraction_result_dir / case_name / "best_params.npy", allow_pickle=True).item()
+    best_raw_params = GPRawParams(**best_raw_params)
+    model = SparseHyperelasticityGP(best_raw_params, I_z, min_dev, min_vol, max_dev, max_vol)
+    model.params = model.load_params(best_raw_params)
+    
+    model.gpweight = model.precompute_weights(best_raw_params)
     n_piola_sample = 5
     pred_piola_stress_funcs = []
     main_key = jr.PRNGKey(456)
     piola_keys = jr.split(main_key, n_piola_sample)
     for key in piola_keys :
-        pred_piola_stress_func = lambda f: learned_gp.piola(fto3x3(f), key)[:2, :2]
+        pred_piola_stress_func = lambda f: model.piola(fto3x3(f), key)[:2, :2]
         pred_piola_stress_funcs.append(pred_piola_stress_func)
 
     # # Create an instance of the problem.
@@ -247,23 +248,20 @@ if __name__ == "__main__" :
                             location_fns = [right,top],
                             material_model_piola_stress=true_piola_stress_func)
 
-    problem_pred = HyperElasticity(mesh = mesh,
-                            vec=2,
-                            dim=2,
-                            ele_type=ele_type,
-                            dirichlet_bc_info=dirichlet_bc_info,
-                            location_fns = [right,top],
-                            material_model_piola_stress=pred_piola_stress_func)
     petsc_options = {
         "snes_type": "newtonls",
-        "snes_linesearch_type": "bt", 
-        "ksp_type": "gmres",
-        "pc_type": "hypre",
-        "ksp_rtol": 1e-5,  # Force higher accuracy in the linear solve
-        "ksp_atol": 1e-8,
+        "snes_linesearch_type": "bt",
+        "snes_monitor": None,
+        "snes_atol": 1e-6,
+        "snes_rtol": 1e-6,
+        "snes_stol": 1e-6,
+        "snes_max_it": 50,
+        "ksp_type": "preonly",
+        "pc_type": "lu",
+        "pc_factor_mat_solver_type": "mumps",
     }
     asym_factor = 0.0
-    loads_top = jnp.linspace(0.0, 12.0, 20)
+    loads_top = jnp.linspace(0.0, 6.0, 10)
     loads_right = loads_top * asym_factor
     loads = jnp.stack([loads_right, loads_top], axis=1)
     # Solve the defined problem.
@@ -291,38 +289,63 @@ if __name__ == "__main__" :
         return u
 
     u_true = solve_fem(problem_true, petsc_options, loads)
-    def piola(f, key) :
-        piola_mean = learned_gp.piola_dist(f).mean
-        piola_var = learned_gp.piola_dist(f).var
-        return piola_mean + jax.random.normal(key, piola_mean.shape) * piola_var
-    def psi(f,key) :
-
-        lambda f: learned_gp.psi(fto3x3(f),key)[:2, :2]
 
     main_key = jr.PRNGKey(42)
     n_samples = 1
     u_samples = []
-    R_nodes_samples = []
-    true_R_nodes = force_residual_force_controlled(u_true, loads[-1], -loads[-1], jax.vmap(lambda f: true_material_model.phi(fto3x3(f))),
-                                                                                            coords = node_coords,
-                                                                                            cells = cells, 
-                                                                                            node_type = node_type)
     for i in range(n_samples) :
-        main_key, subkey = jr.split(main_key)
+        # main_key, subkey = jr.split(main_key)
         # u_pred = jnp.zeros_like(node_coords)
-
-        pred_piola_stress_func = lambda f: piola(fto3x3(f), key = subkey)[:2, :2]
+        success = False
+        tries = 0
+        max_tries = 5
         
+        while not success and tries < max_tries:
+            main_key, subkey = jr.split(main_key)
+            
+            # 1. Setup the problem with the new subkey
+            problem_pred = HyperElasticity(
+                mesh=mesh,
+                vec=2,
+                dim=2,
+                ele_type=ele_type,
+                dirichlet_bc_info=dirichlet_bc_info,
+                location_fns=[right, top],
+                material_model_piola_stress=lambda f: model.piola(fto3x3(f), subkey)[:2, :2]
+            )
+            
+            try:
+                # 2. Attempt the solve
+                print(f"Sample {i}: Attempt {tries + 1}/{max_tries}...")
+                u_pred = solve_fem(problem_pred, petsc_options, loads)
+                
+                # If we reach here, solve_fem succeeded
+                success = True 
+                
+            except Exception as e:
+                # 3. Handle failure
+                tries += 1
+                print(f"Simulation failed on sample {i}, try {tries}: {e}")
+                if tries >= max_tries:
+                    print(f"Max tries reached for sample {i}. Skipping or raising error.")
+                    # Option A: raise e (stops everything)
+                    # Option B: break (moves to next 'i' in n_sample)
+                    raise e 
+
+        # 4. Save and append only if successful
+        if success:
+            u_samples.append(u_pred)
+        pred_piola_stress_func = lambda f: model.piola(fto3x3(f), key = subkey)[:2, :2]
+        problem_pred = HyperElasticity(mesh = mesh,
+                            vec=2,
+                            dim=2,
+                            ele_type=ele_type,
+                            dirichlet_bc_info=dirichlet_bc_info,
+                            location_fns = [right,top],
+                            material_model_piola_stress=pred_piola_stress_func)
         u_pred = solve_fem(problem_pred, petsc_options, loads)
         u_samples.append(u_pred)
-        
-        R_nodes = force_residual_force_controlled(u_pred, loads[-1], -loads[-1], jax.vmap(lambda f: learned_gp.psi(f, key = subkey)),
-                                                                                            coords = node_coords,
-                                                                                            cells = cells, 
-                                                                                            node_type = node_type)
-        R_nodes_samples.append(R_nodes)
     u_pred = jnp.array(u_samples)[-1, :, :]
-    R_nodes_array = jnp.array(R_nodes_samples)[0]
 
     # --- Color Definitions & Custom Colormap ---
     COLOR_BLACK = '#000000'
@@ -399,7 +422,7 @@ if __name__ == "__main__" :
             ax.set_ylabel('Y Position')
 
     plt.tight_layout()
-    plt.savefig(os.path.join("output", "test_fem_analysis.png"))
+    plt.savefig(os.path.join("fem_deployment", "fem_gen_analysis.png"))
 
     f_true, _ = deformation_gradient_element(node_coords[cells], u_true[cells])
     f_pred, _ = deformation_gradient_element(node_coords[cells], u_pred[cells])
