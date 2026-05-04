@@ -17,6 +17,8 @@ from core.model import SparseHyperelasticityGP, GPParams, GPRawParams
 # from core.loss_function import force_residual_force_controlled
 from core.material_models import get_material
 from core.datasetclass import BenchmarkDataset
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -28,83 +30,57 @@ import matplotlib.tri as tri
 import numpy as np
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+import matplotlib.pyplot as plt
+import matplotlib.tri as tri
+import numpy as np
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+from sklearn.metrics import r2_score
+import matplotlib.pyplot as plt
+import numpy as np
 
 def plot_fem_verification(I1_bar_true, I2_bar_true, J_true,
-                          I1_bar_pred, I2_bar_pred, J_pred,
-                          I1_bar_train, I2_bar_train, J_train,
-                          inducing_points):
-    """
-    Plots the FEM verification figures.
-    inducing_points: assumed to be (M, 3) representing [I1_bar, I2_bar, J]
-    """
+                          I1_bar_mean, I1_bar_upper, I1_bar_lower, 
+                          I2_bar_mean, I2_bar_upper, I2_bar_lower,
+                          J_mean, J_upper, J_lower):
+    
+    true_vals = [I1_bar_true, I2_bar_true, J_true]
+    means = [I1_bar_mean, I2_bar_mean, J_mean]
+    uppers = [I1_bar_upper, I2_bar_upper, J_upper]
+    lowers = [I1_bar_lower, I2_bar_lower, J_lower]
+    titles = [r'$\bar{I}_1$', r'$\bar{I}_2$', r'$J$']
 
-    # --- FIGURE 1: Accuracy (Pred vs True) ---
-    fig1, axes1 = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    # I1_bar
-    axes1[0].scatter(I1_bar_true, I1_bar_pred, alpha=0.5, edgecolors='b', facecolors='none')
-    lims = [np.min([axes1[0].get_xlim(), axes1[0].get_ylim()]),
-            np.max([axes1[0].get_xlim(), axes1[0].get_ylim()])]
-    axes1[0].plot(lims, lims, 'k--', alpha=0.75, zorder=0)
-    axes1[0].set_title(r'$\bar{I}_1$ Accuracy')
-    axes1[0].set_xlabel('True')
-    axes1[0].set_ylabel('Pred')
+    for i in range(3):
+        t, m, u, l = true_vals[i], means[i], uppers[i], lowers[i]
+        
+        # Calculate Metrics
+        r2 = r2_score(t, m)
+        # Coverage: percentage of true values within [lower, upper]
+        coverage = np.mean((t >= l) & (t <= u)) * 100
+        
+        # Plotting
+        # Vertical error bars represent the 95% CI
+        axes[i].errorbar(t, m, yerr=[m - l, u - m], fmt='o', 
+                         alpha=0.4, ecolor='gray', mfc='none', mec='b', capsize=2)
+        
+        # Parity Line
+        lims = [np.min([t, m]), np.max([t, m])]
+        axes[i].plot(lims, lims, 'k--', alpha=0.75, label='Parity')
+        
+        # Text annotations for R2 and Coverage
+        stats_text = f'$R^2: {r2:.4f}$\nCov: {coverage:.1f}%'
+        axes[i].text(0.05, 0.95, stats_text, transform=axes[i].transAxes, 
+                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
 
-    # I2_bar
-    axes1[1].scatter(I2_bar_true, I2_bar_pred, alpha=0.5, edgecolors='b', facecolors='none')
-    lims = [np.min([axes1[1].get_xlim(), axes1[1].get_ylim()]),
-            np.max([axes1[1].get_xlim(), axes1[1].get_ylim()])]
-    axes1[1].plot(lims, lims, 'k--', alpha=0.75, zorder=0)
-    axes1[1].set_title(r'$\bar{I}_2$ Accuracy')
-    axes1[1].set_xlabel('True')
-
-    # J
-    axes1[2].scatter(J_true, J_pred, alpha=0.5, edgecolors='b', facecolors='none')
-    lims = [np.min([axes1[2].get_xlim(), axes1[2].get_ylim()]),
-            np.max([axes1[2].get_xlim(), axes1[2].get_ylim()])]
-    axes1[2].plot(lims, lims, 'k--', alpha=0.75, zorder=0)
-    axes1[2].set_title(r'$J$ Accuracy')
-    axes1[2].set_xlabel('True')
-
-    plt.tight_layout()
-    plt.savefig('fem_accuracy_parity.png')
-
-    # --- FIGURE 2: Invariant Space Coverage ---
-    # Inducing points indices: 0:I1_bar, 1:I2_bar, 2:J
-    z_i1 = inducing_points[:, 0]
-    z_i2 = inducing_points[:, 1]
-    z_j  = inducing_points[:, 2]
-
-    fig2, axes2 = plt.subplots(1, 3, figsize=(18, 5))
-
-    # I1_bar vs I2_bar
-    axes2[0].scatter(I1_bar_pred - 3, I2_bar_pred- 3, edgecolors='red', facecolors='none', alpha=0.3, label='Pred (Sim)')
-    axes2[0].scatter(I1_bar_train- 3, I2_bar_train- 3, edgecolors='black', facecolors='none', alpha=0.5, label='Train')
-    axes2[0].scatter(z_i1- 3, z_i2 - 3, color='blue', marker='x', s=50, label='Inducing')
-    axes2[0].set_xlabel(r'$\bar{I}_1 - 3$')
-    axes2[0].set_ylabel(r'$\bar{I}_2 - 3$')
-    axes2[0].set_title(r'$\bar{I}_1 - 3$ vs $\bar{I}_2 - 3$')
-    axes2[0].legend()
-
-    # I1_bar vs J
-    axes2[1].scatter(I1_bar_pred- 3, (J_pred-1)**2, edgecolors='red', facecolors='none', alpha=0.3)
-    axes2[1].scatter(I1_bar_train- 3, (J_train-1)**2, edgecolors='black', facecolors='none', alpha=0.5)
-    axes2[1].scatter(z_i1- 3, (z_j-1)**2, color='blue', marker='x', s=50)
-    axes2[1].set_xlabel(r'$\bar{I}_1 - 3$')
-    axes2[1].set_ylabel(r'$(J - 1)^2$')
-    axes2[1].set_title(r'$\bar{I}_1 - 3$ vs $J$')
-
-    # I2_bar vs J
-    axes2[2].scatter(I2_bar_pred- 3, (J_pred-1)**2, edgecolors='red', facecolors='none', alpha=0.3)
-    axes2[2].scatter(I2_bar_train- 3, (J_train-1)**2, edgecolors='black', facecolors='none', alpha=0.5)
-    axes2[2].scatter(z_i2- 3, (z_j-1)**2, color='blue', marker='x', s=50)
-    axes2[2].set_xlabel(r'$\bar{I}_2 - 3$')
-    axes2[2].set_ylabel(r'$(J - 1)^2$')
-    axes2[2].set_title(r'$\bar{I}_2 - 3$ vs $(J - 1)^2$')
+        axes[i].set_title(f'{titles[i]} Accuracy & CI')
+        axes[i].set_xlabel('True')
+        if i == 0: axes[i].set_ylabel('Predicted Mean')
 
     plt.tight_layout()
-    plt.savefig('invariant_space_coverage.png')
-
+    plt.savefig('fem_deployment/fem_accuracy_parity_with_ci.pdf')
 
 def plot_force_fields(node_coords, cells, f, filename="force_fields.png"):
     """
@@ -145,6 +121,100 @@ def plot_force_fields(node_coords, cells, f, filename="force_fields.png"):
     plt.savefig(filename, dpi=300)
     print(f"Figure saved as {filename}")
 
+def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, save_path):
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif"],
+        "font.size": 14,
+        "axes.titlesize": 18,
+        "axes.labelsize": 16,
+        "legend.fontsize": 16,
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        "figure.dpi": 600,
+        "savefig.dpi": 600,
+        "text.usetex": False
+    })
+
+    # --- Data Preparation ---
+    coords_true = node_coords + u_true
+    coords_pred = node_coords + u_pred_mean
+    
+    def get_mag(u): return np.linalg.norm(u, axis=1)
+    mag_true = get_mag(u_true)
+    mag_pred = get_mag(u_pred_mean)
+    error = np.linalg.norm(u_true - u_pred_mean, axis=1)/(mag_true+1e-6) * 100
+    mag_std = get_mag(u_pred_std) if u_pred_std.ndim > 1 else u_pred_std
+
+    fig, axes = plt.subplots(2, 2, figsize=(12*1.5, 14*1.5)) # Slightly wider to accommodate colorbars
+    # plt.suptitle('Deformed Field: Accuracy & Uncertainty', fontsize=20)
+
+
+    # --- Helper Function for Colorbars ---
+    def add_colorbar(im, ax, label):
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
+        
+        # cbar = fig.colorbar(im, cax=cax, label=label)
+        cbar = fig.colorbar(im, cax=cax)
+        
+        # 1. Set the main colorbar title (label) and its size
+        cbar.set_label(label, size=36, weight='bold') # Adjust '16' as needed
+        
+        # 2. Set the size of the tick values (the numbers)
+        cbar.ax.tick_params(labelsize=36) # Adjust '14' as needed
+        cbar.locator = ticker.MaxNLocator(nbins=4)
+        cbar.update_ticks()
+
+    # 1,1: True Material
+    tri_true = tri.Triangulation(coords_true[:, 0], coords_true[:, 1], cells)
+    im1 = axes[0, 0].tripcolor(tri_true, mag_true, cmap='Blues')
+    # axes[0, 0].set_title('True Material Model $\|\mathbf{u_{true}}\|$')
+    add_colorbar(im1, axes[0, 0], "$\|\mathbf{u_{true}}\|$")
+
+    # 1,2: Predicted Material
+    tri_pred = tri.Triangulation(coords_pred[:, 0], coords_pred[:, 1], cells)
+    im2 = axes[0, 1].tripcolor(tri_pred, mag_pred, cmap='Blues')
+    # axes[0, 1].set_title('Predicted Material Model $\|\mathbf{u_{pred}}\|$')
+    add_colorbar(im2, axes[0, 1], "$\|\mathbf{u_{pred}}\|$")
+
+    # 2,1: Nodal error
+    im3 = axes[1, 0].tripcolor(tri_pred, error, cmap='inferno')
+    # axes[1, 0].set_title(r'$||\mthbf{u_{true}} - \mathbf{u_{pred}}||$')
+    add_colorbar(im3, axes[1, 0], r"$\% Error$")
+
+    # 2,2: Uncertainty
+    im4 = axes[1, 1].tripcolor(tri_pred, mag_std, cmap='magma')
+    # axes[1, 1].set_title(r'Uncertainty ($\sigma_u$)')
+    add_colorbar(im4, axes[1, 1], "$\sigma_{\|\mathbf{u_{pred}}\|}$")
+
+    # Standardize labels
+    for ax in axes.flat:
+        # ax.set_xlabel('X')
+        # ax.set_ylabel('Y')
+        # for ax in axes.flat:
+        # Remove axis labels
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        
+        # Remove tick marks and tick labels (values)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+            
+        # Ensure the grid is off so it doesn't show through the transparency
+        # ax.grid(False)
+        # Optional: if you want to remove the frame/box as well, uncomment the line below
+        ax.axis('off') 
+        
+        # ax.set_aspect('equal')
+        ax.set_aspect('equal')
+
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    # plt.tight_layout(rect=[0, 0, 1, 1])
+    os.makedirs(save_path, exist_ok=True)
+    plt.savefig(os.path.join(save_path, "fem_diff_geometry.pdf"), bbox_inches='tight')
 # Usage:
 # plot_force_fields(node_coords, cells, R_nodes)
 
@@ -231,13 +301,6 @@ if __name__ == "__main__" :
     model.params = model.load_params(best_raw_params)
     
     model.gpweight = model.precompute_weights(best_raw_params)
-    n_piola_sample = 5
-    pred_piola_stress_funcs = []
-    main_key = jr.PRNGKey(456)
-    piola_keys = jr.split(main_key, n_piola_sample)
-    for key in piola_keys :
-        pred_piola_stress_func = lambda f: model.piola(fto3x3(f), key)[:2, :2]
-        pred_piola_stress_funcs.append(pred_piola_stress_func)
 
     # # Create an instance of the problem.
     problem_true = HyperElasticity(mesh = mesh,
@@ -291,7 +354,7 @@ if __name__ == "__main__" :
     u_true = solve_fem(problem_true, petsc_options, loads)
 
     main_key = jr.PRNGKey(42)
-    n_samples = 1
+    n_samples = 256
     u_samples = []
     for i in range(n_samples) :
         # main_key, subkey = jr.split(main_key)
@@ -335,120 +398,54 @@ if __name__ == "__main__" :
         # 4. Save and append only if successful
         if success:
             u_samples.append(u_pred)
-        pred_piola_stress_func = lambda f: model.piola(fto3x3(f), key = subkey)[:2, :2]
-        problem_pred = HyperElasticity(mesh = mesh,
-                            vec=2,
-                            dim=2,
-                            ele_type=ele_type,
-                            dirichlet_bc_info=dirichlet_bc_info,
-                            location_fns = [right,top],
-                            material_model_piola_stress=pred_piola_stress_func)
-        u_pred = solve_fem(problem_pred, petsc_options, loads)
-        u_samples.append(u_pred)
-    u_pred = jnp.array(u_samples)[-1, :, :]
+            sample_dir = os.path.join("fem_deployment", "samples")
+            if not os.path.exists(sample_dir):
+                os.makedirs(sample_dir)
+                
+            save_file = os.path.join(sample_dir, f"u_pred_{i}.npz")
+            np.savez_compressed(save_file, u_pred=u_pred, cells=cells, 
+                                node_coords=node_coords, node_type=node_type)
+    u_pred_samples = jnp.array(u_samples)
 
-    # --- Color Definitions & Custom Colormap ---
-    COLOR_BLACK = '#000000'
-    COLOR_GREY  = '#808080'
-    COLOR_NAVY  = '#000080'
-    COLOR_ROYAL = '#4169E1'
+    u_pred_mean = jnp.mean(u_pred_samples, axis=0)
+    u_pred_std = jnp.std(u_pred_samples, axis=0)
 
-    # Creating a gradient: Black -> Grey -> Navy -> Royal
-    custom_cmap = LinearSegmentedColormap.from_list("fem_style", 
-        [COLOR_BLACK, COLOR_GREY, COLOR_NAVY, COLOR_ROYAL], N=256)
-
-    # --- 1. Calculations ---
-    u_true_sq_mag = u_true[:, 0]**2 + u_true[:, 1]**2
-    u_pred_sq_mag = u_pred[:, 0]**2 + u_pred[:, 1]**2
-    u_error_mag = np.linalg.norm(u_true - u_pred, axis=1)
-
-    # Deformed nodal positions
-    wp_true = node_coords[:, :2] + u_true
-    wp_pred = node_coords[:, :2] + u_pred
-
-    # --- SCALE SYNCHRONIZATION ---
-    # Calculate GLOBAL limits across both True and Predicted deformed sets
-    all_x = np.concatenate([wp_true[:, 0], wp_pred[:, 0]])
-    all_y = np.concatenate([wp_true[:, 1], wp_pred[:, 1]])
-
-    x_min, x_max = all_x.min(), all_x.max()
-    y_min, y_max = all_y.min(), all_y.max()
-
-    # Add a 5% margin padding to the axes
-    x_margin = (x_max - x_min) * 0.05
-    y_margin = (y_max - y_min) * 0.05
-    x_lims = (x_min - x_margin, x_max + x_margin)
-    y_lims = (y_min - y_margin, y_max + y_margin)
-
-    # Create Triangulations
-    tri_true = tri.Triangulation(wp_true[:, 0], wp_true[:, 1], cells)
-    tri_pred = tri.Triangulation(wp_pred[:, 0], wp_pred[:, 1], cells)
-
-    # --- 2. Plotting ---
-    fig, axes = plt.subplots(1, 3, figsize=(12, 6), facecolor='white')
-    fig.suptitle('FEM Deformation Analysis (Synchronized Axis Scales)', fontsize=18, fontweight='bold', y=1.05)
-
-    # Plot 1: True Deformed
-    ax1 = axes[0]
-    tpc1 = ax1.tripcolor(tri_true, u_true_sq_mag, cmap="Blues", shading='gouraud')
-    ax1.triplot(tri_true, color=COLOR_GREY, linewidth=0.5, alpha=0.3)
-    fig.colorbar(tpc1, ax=ax1, label='$u_x^2 + u_y^2$')
-    ax1.set_title('True Deformed Domain', fontsize=14)
-
-    # Plot 2: Predicted Deformed
-    ax2 = axes[1]
-    tpc2 = ax2.tripcolor(tri_pred, u_pred_sq_mag, cmap="Blues", shading='gouraud')
-    ax2.triplot(tri_pred, color=COLOR_GREY, linewidth=0.5, alpha=0.3)
-    fig.colorbar(tpc2, ax=ax2, label='$u_x^2 + u_y^2$')
-    ax2.set_title('Predicted Deformed Domain', fontsize=14)
-
-    # Plot 3: Absolute Error on Predicted Mesh
-    ax3 = axes[2]
-    tpc3 = ax3.tripcolor(tri_pred, u_error_mag, cmap='inferno', shading='gouraud')
-    ax3.triplot(tri_pred, color=COLOR_GREY, linewidth=0.5, alpha=0.4)
-    fig.colorbar(tpc3, ax=ax3, label='Error Magnitude')
-    ax3.set_title('Nodal Prediction Error', fontsize=14, fontweight='bold')
-
-    # --- Formatting & Applying Uniform Scale ---
-    for i, ax in enumerate(axes):
-        ax.set_aspect('equal') # Maintain geometric proportions
-        ax.set_xlim(x_lims)    # Synchronized X
-        ax.set_ylim(y_lims)    # Synchronized Y
-        ax.set_xlabel('X Position')
-        ax.grid(True, linestyle=':', alpha=0.5)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        if i == 0:
-            ax.set_ylabel('Y Position')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join("fem_deployment", "fem_gen_analysis.png"))
+    # plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, "fem_deployment")
 
     f_true, _ = deformation_gradient_element(node_coords[cells], u_true[cells])
-    f_pred, _ = deformation_gradient_element(node_coords[cells], u_pred[cells])
-    invariants_true, _ = jax.vmap(invariants_and_derivatives)(f_true)
-    invariants_pred, _ = jax.vmap(invariants_and_derivatives)(f_pred)
+    vmapped_def_grad = jax.vmap(deformation_gradient_element, in_axes=(None, 0))
+    f_pred_samples, _ = vmapped_def_grad(node_coords[cells], u_pred_samples[:, cells])
+    invariants_true, _ = jax.vmap(invariants_and_derivatives)(jax.vmap(fto3x3)(f_true))
+    vmapped_inv_samples = jax.vmap(jax.vmap(invariants_and_derivatives))
+    invariants_pred_samples, _ = vmapped_inv_samples(jax.vmap(jax.vmap(fto3x3))(f_pred_samples))
     dev_true, vol_true = jax.vmap(transform_input_features)(invariants_true)
-    dev_pred, vol_pred = jax.vmap(transform_input_features)(invariants_pred)
+    vmapped_feat_samples = jax.vmap(jax.vmap(transform_input_features))
+    dev_pred_samples, vol_pred_samples = vmapped_feat_samples(invariants_pred_samples)
+    dev_pred_mean = jnp.mean(dev_pred_samples, axis=0)
+    vol_pred_mean = jnp.mean(vol_pred_samples, axis=0)
     I1_true = dev_true[:, 0]
     I2_true = dev_true[:, 1]
-    J_true = vol_true
-    I1_pred = dev_pred[:, 0]
-    I2_pred = dev_pred[:, 1]
-    J_pred = vol_pred
+    J_true = vol_true[:, 0]
+    I1_pred_mean = dev_pred_mean[:, 0]
+    I2_pred_mean = dev_pred_mean[:, 1]
+    J_pred_mean = vol_pred_mean[:, 0]
+    I1_pred_lower, I1_pred_upper = np.quantile(dev_pred_samples[:, :, 0], [0.025, 0.975], axis = 0)
+    I2_pred_lower, I2_pred_upper = np.quantile(dev_pred_samples[:, :, 1], [0.025, 0.975], axis = 0)
+    J_pred_lower, J_pred_upper = np.quantile(vol_pred_samples[:, :, 0], [0.025, 0.975], axis = 0)
+
     # I1_pred = dev_true[:, 0]
     # I2_pred = dev_true[:, 1]
     # J_pred = vol_true
-    dev_train, vol_train = jax.vmap(transform_input_features)(I_obs_all)
+    dev_train, vol_train = jax.vmap(transform_input_features)(I_obs_all.reshape(-1, 3))
     I1_train = dev_train[:, 0]
     I2_train = dev_train[:, 1]
     J_train = vol_train
     
     inducing = I_z
     plot_fem_verification(I1_true, I2_true, J_true,
-                        I1_pred, I2_pred, J_pred,
-                        I1_train, I2_train, J_train,
-                        inducing)
+                        I1_pred_mean, I1_pred_upper, I1_pred_lower,
+                        I2_pred_mean, I2_pred_upper, I2_pred_lower,
+                        J_pred_mean, J_pred_upper, J_pred_lower)
     #plot I1_bar_pred vs I1_bar_true, I2_bar_pred vs I2_bar_true, J_pred vs J_true
 
     #plot I1_bar vs I2_bar (train, test), I1_bar vs J (train, test), I2_bar vs J (train, test)
