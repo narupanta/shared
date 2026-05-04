@@ -181,17 +181,18 @@ class MooneyRivlin(BaseMaterialModel):
 
 @register_material("neohookean")
 class NeoHookean(BaseMaterialModel):
-    def __init__(self, c1=2.5, c2=5.0, jit_P: bool = True):
+    def __init__(self, c1=1.0, c2=1.5, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
         self.c1 = c1
         self.c2 = c2
 
     def psi(self, F: jnp.ndarray) -> jnp.ndarray:
-        B = B_func(F)
-        I1 = I1_func(B)
-        I3 = I3_func(B)
-        term1 = self.c1 * (I3**(-1/3) * I1 - 3)
-        term2 = self.c2 * (jnp.sqrt(I3) - 1)**2
+        C = C_func(F)
+        I1 = I1_func(C)
+        I3 = I3_func(C)
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
+        term2 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2
 
 
@@ -216,7 +217,7 @@ class Isihara(BaseMaterialModel):
 
 @register_material("gentthomas")
 class GentThomas(BaseMaterialModel):
-    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
+    def __init__(self, c1=1.0, c2=1.5, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
         self.c1 = c1
         self.c2 = c2

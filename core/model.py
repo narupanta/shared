@@ -50,9 +50,9 @@ class SparseHyperelasticityGP:
         vol_z = vol_z.at[0].set(jnp.array([1.0]))
 
         dev_u_mean = dev_mu.at[0].set(0.0)
-        dev_u_var  = dev_var.at[0].set(1e-6)
+        dev_u_var  = dev_var.at[0].set(1e-8)
         vol_u_mean = vol_mu.at[0].set(0.0)
-        vol_u_var  = vol_var.at[0].set(1e-6)
+        vol_u_var  = vol_var.at[0].set(1e-8)
 
         return GPParams(
             dev_ls=self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls),

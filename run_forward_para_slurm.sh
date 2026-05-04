@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --partition=gpu_teaching
+#SBATCH --partition=gpu_irmb
 #SBATCH --nodes=1
 #SBATCH --time=20:00:00
-#SBATCH --job-name=train_hydrogel
+#SBATCH --job-name=forward_para
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:ampere
 

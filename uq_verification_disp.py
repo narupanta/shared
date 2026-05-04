@@ -39,7 +39,7 @@ import matplotlib.tri as tri
 import numpy as np
 import matplotlib.pyplot as plt
 import argparse
-
+import matplotlib.ticker as ticker
 
 def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot, save_path):
     """
@@ -133,84 +133,221 @@ def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot,
         ax4.set_ylabel('Density')
 
         # Save and Show
-        save_file = os.path.join(save_path, f"analysis_{label}_{node_to_plot}_direction.png")
+        save_file = os.path.join(save_path, f"analysis_{label}_{node_to_plot}_direction.pdf")
         plt.savefig(save_file, dpi=300, bbox_inches='tight')
         plt.show()
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+
 def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_samples, node_to_plot, save_path):
     """
-    Plots local distributions with 95% Quantile CIs for a list of nodes.
+    Plots local distributions in a 2-row grid.
+    Row 0: X-direction for all nodes
+    Row 1: Y-direction for all nodes
     """
     os.makedirs(save_path, exist_ok=True)
-    
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif"],
+        "font.size": 16,
+        "axes.titlesize": 18,
+        "axes.labelsize": 18,
+        "legend.fontsize": 16,
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
+        "figure.dpi": 600,
+        "savefig.dpi": 600,
+        "text.usetex": False
+    })
+
     num_nodes_to_plot = len(node_to_plot)
-    fig, axes = plt.subplots(num_nodes_to_plot, 2, figsize=(14, 5 * num_nodes_to_plot))
     
+    # 2 rows, num_nodes columns
+    # Flipped figsize: width scales with nodes, height is fixed for 2 rows
+    fig, axes = plt.subplots(2, num_nodes_to_plot, 
+                             figsize=(5 * num_nodes_to_plot, 14 / 1.5))
+    
+    # Standardize axes to 2D array [row, col] even if 1 node is plotted
     if num_nodes_to_plot == 1:
-        axes = np.expand_dims(axes, axis=0)
+        axes = axes.reshape(2, 1)
 
     directions = [
-        {'idx': 0, 'label': 'X', 'color1': 'dodgerblue', 'color2': 'violet'},
+        {'idx': 0, 'label': 'X', 'color1': 'blue', 'color2': 'dodgerblue'},
         {'idx': 1, 'label': 'Y', 'color1': 'teal', 'color2': 'green'}
     ]
 
-    for i, node_idx in enumerate(node_to_plot):
+    for node_col, node_idx in enumerate(node_to_plot):
         for d_info in directions:
-            d = d_info['idx']
-            ax = axes[i, d]
+            row_idx = d_info['idx']
+            ax = axes[row_idx, node_col]
+            label_suffix = f"({d_info['label']})"
             
-            # 1. Extract Data
-            samples = u_pred_samples[:, node_idx, d]
-            pt_samples = u_pred_piola_traction_samples[:, node_idx, d]
-            u_true_node = u_true[node_idx, d]
+            # Data extraction
+            samples = u_pred_samples[:, node_idx, row_idx]
+            pt_samples = u_pred_piola_traction_samples[:, node_idx, row_idx]
+            u_true_node = u_true[node_idx, row_idx]
             
-            # 2. Calculate Robust Statistics (Quantiles)
-            # Piola Samples
-            p_median = np.median(samples)
+            p_mean = np.mean(samples)
             p_low, p_high = np.quantile(samples, [0.025, 0.975])
-            
-            # Piola Traction Samples
-            pt_median = np.median(pt_samples)
+            pt_mean = np.mean(pt_samples)
             pt_low, pt_high = np.quantile(pt_samples, [0.025, 0.975])
 
-            # 3. Plot Histograms
+            # Internal Annotation
+            ax.text(0.05, 0.92, f'Node: {node_idx}', transform=ax.transAxes,
+                    fontsize=14, fontweight='bold', verticalalignment='top',
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='gray'))
+
+            # Plots
             ax.hist(samples, bins=40, density=True, alpha=0.3, 
-                    color=d_info['color1'], label='Piola Samples')
+                    color=d_info['color1'], label=f'Piola {label_suffix}')
             ax.hist(pt_samples, bins=40, density=True, alpha=0.3, 
-                    color=d_info['color2'], label='Piola Traction Samples')
+                    color=d_info['color2'], label=f'PT {label_suffix}')
 
-            # 4. Add Vertical Lines for Medians
-            ax.axvline(u_true_node, color='red', linestyle='-', linewidth=2, 
-                       label=f'True: {u_true_node:.4e}')
-            ax.axvline(p_median, color=d_info['color1'], linestyle='--', linewidth=1.5, 
-                       label=f'Piola Median: {p_median:.4e}')
-            ax.axvline(pt_median, color=d_info['color2'], linestyle='--', linewidth=1.5, 
-                       label=f'PT Median: {pt_median:.4e}')
+            ax.axvline(u_true_node, color='red', linestyle='-', linewidth=2, label=f'True {label_suffix}')
+            ax.axvline(p_mean, color=d_info['color1'], linestyle='--', linewidth=1.5, label=f'Piola Mean {label_suffix}')
+            ax.axvline(pt_mean, color=d_info['color2'], linestyle='--', linewidth=1.5, label=f'PT Mean {label_suffix}')
 
-            # 5. Plot Confidence Intervals as Shaded Regions (95% CI)
-            ax.axvspan(p_low, p_high, color=d_info['color1'], alpha=0.1, 
-                       label='Piola 95% CI')
-            ax.axvspan(pt_low, pt_high, color=d_info['color2'], alpha=0.1, 
-                       label='PT 95% CI')
-            
-            # Optional: Add faint boundary lines for the CIs
-            ax.axvline(p_low, color=d_info['color1'], linestyle=':', alpha=0.5, linewidth=1)
-            ax.axvline(p_high, color=d_info['color1'], linestyle=':', alpha=0.5, linewidth=1)
-            
+            ax.axvspan(p_low, p_high, color=d_info['color1'], alpha=0.1, label=f'Piola 95% CI {label_suffix}')
+            ax.axvspan(pt_low, pt_high, color=d_info['color2'], alpha=0.1, label=f'PT 95% CI {label_suffix}')
+
             # Formatting
-            if i == 0:
-                ax.set_title(f'Direction {d_info["label"]}', fontsize=15)
-            if d == 0:
-                ax.set_ylabel(f'Node {node_idx}\nDensity', fontsize=12, fontweight='bold')
-                
-            ax.legend(fontsize=7, loc='upper right', frameon=True, framealpha=0.8)
-            ax.grid(alpha=0.2)
+            if node_col == 0:
+                ax.set_ylabel(f'Density ({d_info["label"]})', fontweight='bold')
+            if row_idx == 1:
+                ax.set_xlabel('Displacement')
+            # if row_idx == 0:
+            #     ax.set_title(f'Node Column {node_idx}')
 
-    plt.suptitle('Local Displacement Distributions: Median & 95% Quantile CI', fontsize=18, y=1.02)
-    plt.tight_layout()
+            ax.grid(alpha=0.2)
+            ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=4))
+
+    # --- Legend ---
+    handles_all, labels_all = [], []
+    for ax in axes.flat:
+        h, l = ax.get_legend_handles_labels()
+        for handle, label in zip(h, l):
+            if label not in labels_all:
+                handles_all.append(handle)
+                labels_all.append(label)
+
+    # Sort labels so X-direction labels come first, then Y-direction
+    # This ensures X occupies the top row and Y occupies the bottom row when ncol is set
+    x_indices = [i for i, l in enumerate(labels_all) if "(X)" in l or "True" in l and "(X)" in l]
+    y_indices = [i for i, l in enumerate(labels_all) if "(Y)" in l or "True" in l and "(Y)" in l]
     
-    save_file = os.path.join(save_path, "local_node_distributions_quantile.png")
-    plt.savefig(save_file, dpi=300, bbox_inches='tight')
+    # Reorder handles and labels
+    sorted_handles = [handles_all[i] for i in x_indices] + [handles_all[i] for i in y_indices]
+    sorted_labels = [labels_all[i] for i in x_indices] + [labels_all[i] for i in y_indices]
+
+    # Calculate ncol: number of labels in one direction (should be equal for X and Y)
+    num_cols = len(x_indices)
+
+    fig.legend(sorted_handles, sorted_labels, 
+               loc='upper center', 
+               bbox_to_anchor=(0.5, 1.02), # Moved up slightly to accommodate 2 rows
+               ncol=num_cols, 
+               frameon=True,
+               columnspacing=1.0,
+               handletextpad=0.5)
+
+    # Increase the top margin in rect (0.88) to make room for 2 rows of legend
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    save_file = os.path.join(save_path, "local_node_distributions.pdf")
+    plt.savefig(save_file, bbox_inches='tight', transparent=True)
+    # print(f"Transposed plot saved to: {save_file}")
     # plt.show()
+# def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_samples, node_to_plot, save_path):
+#     """
+#     Plots local distributions with 95% Quantile CIs.
+#     Layout: Rows = 2 (X, Y), Columns = num_nodes_to_plot.
+#     """
+#     os.makedirs(save_path, exist_ok=True)
+#     plt.rcParams.update({
+#     "font.family": "serif",
+#     "font.serif": ["Times New Roman", "DejaVu Serif"], # Falls back to DejaVu if Times isn't found
+#     "font.size": 16,                # Base font size
+#     "axes.titlesize": 18,           # Subplot titles
+#     "axes.labelsize": 16,           # X and Y labels
+#     "legend.fontsize": 8,          # Legend text
+#     "xtick.labelsize": 10,          # Axis tick numbers
+#     "ytick.labelsize": 10,
+#     "figure.dpi": 600,              # High resolution for the screen and save
+#     "savefig.dpi": 600,             # Ensures saved file is high quality
+#     "text.usetex": False            # Set to True only if you have a full LaTeX install
+#     })
+#     # ... [Keep your plt.rcParams update here] ...
+
+#     num_nodes_to_plot = len(node_to_plot)
+    
+#     # SWAP HERE: 2 rows, num_nodes_to_plot columns
+#     # We increase width (14 -> 5 * nodes) and decrease height (5 * nodes -> 8)
+#     fig, axes = plt.subplots(2, num_nodes_to_plot, figsize=(5 * num_nodes_to_plot, 8), squeeze=False)
+    
+#     directions = [
+#         {'idx': 0, 'label': 'X', 'color1': 'blue', 'color2': 'dodgerblue'},
+#         {'idx': 1, 'label': 'Y', 'color1': 'teal', 'color2': 'green'}
+#     ]
+
+#     for j, node_idx in enumerate(node_to_plot):
+#         for i, d_info in enumerate(directions):
+#             d = d_info['idx']
+            
+#             # Indexing is now [row, col] -> [direction_index, node_index]
+#             ax = axes[i, j]
+            
+#             # 1. Extract Data
+#             samples = u_pred_samples[:, node_idx, d]
+#             pt_samples = u_pred_piola_traction_samples[:, node_idx, d]
+#             u_true_node = u_true[node_idx, d]
+            
+#             # 2. Statistics
+#             p_mean, pt_mean = np.mean(samples), np.mean(pt_samples)
+#             p_low, p_high = np.quantile(samples, [0.025, 0.975])
+#             pt_low, pt_high = np.quantile(pt_samples, [0.025, 0.975])
+
+#             # 3. Plot Histograms
+#             ax.hist(samples, bins=30, density=True, alpha=0.3, color=d_info['color1'], label='Piola Samples')
+#             ax.hist(pt_samples, bins=30, density=True, alpha=0.3, color=d_info['color2'], label='PT Samples')
+
+#             # 4. Vertical Lines & Shaded CI
+#             ax.axvline(u_true_node, color='red', linestyle='-', linewidth=2, 
+#                        label=f'True: {u_true_node:.4e}')
+#             ax.axvline(p_mean, color=d_info['color1'], linestyle='--', linewidth=1.5, 
+#                        label=f'Piola Mean: {p_mean:.4e}')
+#             ax.axvline(pt_mean, color=d_info['color2'], linestyle='--', linewidth=1.5, 
+#                        label=f'PT Mean: {pt_mean:.4e}')
+
+#             # 5. Plot Confidence Intervals as Shaded Regions (95% CI)
+#             ax.axvspan(p_low, p_high, color=d_info['color1'], alpha=0.1, 
+#                        label='Piola 95% CI')
+#             ax.axvspan(pt_low, pt_high, color=d_info['color2'], alpha=0.1, 
+#                        label='PT 95% CI')
+
+#             # Optional: Add faint boundary lines for the CIs
+#             ax.axvline(p_low, color=d_info['color1'], linestyle=':', alpha=0.5, linewidth=1)
+#             ax.axvline(p_high, color=d_info['color1'], linestyle=':', alpha=0.5, linewidth=1)
+            
+#             # Formatting
+#             # Titles only on the first row
+#             if i == 0:
+#                 ax.set_title(f'Node {node_idx}')
+            
+#             # Y-labels only on the first column
+#             if j == 0:
+#                 ax.set_ylabel(f'Displacement {d_info["label"]}\nDensity')
+                
+#             ax.legend(loc='upper right')
+#             ax.grid(alpha=0.2)
+
+#     # plt.suptitle('Local Displacement Distributions', fontsize = 22, y=1.05)
+#     plt.tight_layout()
+    
+#     save_file = os.path.join(save_path, "local_node_distributions_quantile.pdf")
+#     plt.savefig(save_file, bbox_inches='tight', transparent=True)
+#     print(f"Saved to: {save_file}")
 # Example: plot_comprehensive_analysis(u_true, u_pred_samples, 50, "plots/")
 
 # Usage:
@@ -223,82 +360,136 @@ def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_sample
 # plot_global_index_analysis(u_true, u_pred_samples, "plots/")
 # Example Usage:
 # plot_global_analysis(u_true, u_pred_samples, node_coords, "plots/")
+import os
+import matplotlib.pyplot as plt
+import matplotlib.tri as tri
+import numpy as np
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, node_indices, save_path):
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif"],
+        "font.size": 14,
+        "axes.titlesize": 18,
+        "axes.labelsize": 16,
+        "legend.fontsize": 16,
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+        "figure.dpi": 600,
+        "savefig.dpi": 600,
+        "text.usetex": False
+    })
+
     # --- Data Preparation ---
     node_indices = np.array(node_indices)
-    
-    # Calculate deformed coordinates
     coords_true = node_coords + u_true
     coords_pred = node_coords + u_pred_mean
     
-    # Calculate magnitudes/errors
     def get_mag(u): return np.linalg.norm(u, axis=1)
     mag_true = get_mag(u_true)
     mag_pred = get_mag(u_pred_mean)
-    error = np.linalg.norm(u_true - u_pred_mean, axis=1)
+    error = np.linalg.norm(u_true - u_pred_mean, axis=1)/mag_true * 100
     mag_std = get_mag(u_pred_std) if u_pred_std.ndim > 1 else u_pred_std
 
-    # Extract coordinates for the red crosses
     marker_coords_true = coords_true[node_indices]
     marker_coords_pred = coords_pred[node_indices]
 
-    fig, axes = plt.subplots(2, 2, figsize=(10, 12)) 
-    plt.suptitle('Deformed Field: Accuracy & Uncertainty', fontsize=20)
+    fig, axes = plt.subplots(2, 2, figsize=(12*1.5, 14*1.5)) # Slightly wider to accommodate colorbars
+    # plt.suptitle('Deformed Field: Accuracy & Uncertainty', fontsize=20)
 
-    # --- Updated Helper Function with Text Annotation ---
+    # --- Helper Function for Labels ---
     def add_markers_with_labels(ax, coords, indices):
-        # Plot the crosses
         ax.scatter(coords[:, 0], coords[:, 1], 
-                   color='red', marker='x', s=60, linewidths=1.5, 
-                   label='Probe Nodes', zorder=6)
-        
-        # Add text labels for each node index
+                   color='red', marker='x', s=60*1.5, linewidths=1.5, 
+                   label='Probe Nodes', zorder=8)
         for i, idx in enumerate(indices):
-            ax.annotate(f'ID: {idx}', 
-                        (coords[i, 0], coords[i, 1]),
-                        textcoords="offset points", 
-                        xytext=(5, 5),          # Offset text by 5 points right and up
-                        fontsize=9, 
-                        fontweight='bold',
-                        color='red',
-                        zorder=7)
+                    ax.annotate(f'ID: {idx}', 
+                                (coords[i, 0], coords[i, 1]),
+                                textcoords="offset points", 
+                                xytext=(-60, 10),        # Slightly increased vertical offset for better clearance
+                                fontsize=28, 
+                                fontweight='bold',
+                                color='red',
+                                zorder=7,
+                                # --- Background Box Styling ---
+                                bbox=dict(
+                                    boxstyle='round,pad=0.3', 
+                                    facecolor='white', 
+                                    edgecolor='red', 
+                                    alpha=0.8,
+                                    linewidth=1
+                                ))
+
+    # --- Helper Function for Colorbars ---
+    def add_colorbar(im, ax, label):
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
+        
+        # cbar = fig.colorbar(im, cax=cax, label=label)
+        cbar = fig.colorbar(im, cax=cax)
+        
+        # 1. Set the main colorbar title (label) and its size
+        cbar.set_label(label, size=36, weight='bold') # Adjust '16' as needed
+        
+        # 2. Set the size of the tick values (the numbers)
+        cbar.ax.tick_params(labelsize=36) # Adjust '14' as needed
+        cbar.locator = ticker.MaxNLocator(nbins=4)
+        cbar.update_ticks()
 
     # 1,1: True Material
     tri_true = tri.Triangulation(coords_true[:, 0], coords_true[:, 1], cells)
     im1 = axes[0, 0].tripcolor(tri_true, mag_true, cmap='Blues')
     add_markers_with_labels(axes[0, 0], marker_coords_true, node_indices)
-    axes[0, 0].set_title('True Material')
-    fig.colorbar(im1, ax=axes[0, 0])
+    # axes[0, 0].set_title('True Material Model $\|\mathbf{u_{true}}\|$')
+    add_colorbar(im1, axes[0, 0], "$\|\mathbf{u_{true}}\|$")
 
     # 1,2: Predicted Material
     tri_pred = tri.Triangulation(coords_pred[:, 0], coords_pred[:, 1], cells)
     im2 = axes[0, 1].tripcolor(tri_pred, mag_pred, cmap='Blues')
     add_markers_with_labels(axes[0, 1], marker_coords_pred, node_indices)
-    axes[0, 1].set_title('Predicted Material')
-    fig.colorbar(im2, ax=axes[0, 1])
+    # axes[0, 1].set_title('Predicted Material Model $\|\mathbf{u_{pred}}\|$')
+    add_colorbar(im2, axes[0, 1], "$\|\mathbf{u_{pred}}\|$")
 
     # 2,1: Nodal error
     im3 = axes[1, 0].tripcolor(tri_pred, error, cmap='inferno')
     add_markers_with_labels(axes[1, 0], marker_coords_pred, node_indices)
-    axes[1, 0].set_title(r'$||u_{true} - u_{pred}||$')
-    fig.colorbar(im3, ax=axes[1, 0])
+    # axes[1, 0].set_title(r'$||\mthbf{u_{true}} - \mathbf{u_{pred}}||$')
+    add_colorbar(im3, axes[1, 0], r"$\% Error$")
 
     # 2,2: Uncertainty
     im4 = axes[1, 1].tripcolor(tri_pred, mag_std, cmap='magma')
     add_markers_with_labels(axes[1, 1], marker_coords_pred, node_indices)
-    axes[1, 1].set_title(r'Uncertainty ($\sigma_u$)')
-    fig.colorbar(im4, ax=axes[1, 1])
+    # axes[1, 1].set_title(r'Uncertainty ($\sigma_u$)')
+    add_colorbar(im4, axes[1, 1], "$\sigma_{\|\mathbf{u_{pred}}\|}$")
 
     # Standardize labels
     for ax in axes.flat:
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
+        # ax.set_xlabel('X')
+        # ax.set_ylabel('Y')
+        # for ax in axes.flat:
+        # Remove axis labels
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        
+        # Remove tick marks and tick labels (values)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+            
+        # Ensure the grid is off so it doesn't show through the transparency
+        # ax.grid(False)
+        # Optional: if you want to remove the frame/box as well, uncomment the line below
+        ax.axis('off') 
+        
+        # ax.set_aspect('equal')
         ax.set_aspect('equal')
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    # plt.tight_layout(rect=[0, 0, 1, 1])
     os.makedirs(save_path, exist_ok=True)
-    plt.savefig(os.path.join(save_path, "displacement_analysis.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, "displacement_analysis.pdf"), bbox_inches='tight')
 
 
 import matplotlib.pyplot as plt
@@ -307,63 +498,84 @@ import os
 from sklearn.metrics import r2_score
 
 def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_path, suffix="_"):
-    """
-    Plots Predicted vs True values for both X and Y directions in subplots.
-    Expects arrays of shape (N, 2) for x and y components.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    labels = ['X-Direction', 'Y-Direction']
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif"],
+        "font.size": 28,
+        "axes.titlesize": 32,
+        "axes.labelsize": 32,
+        "legend.fontsize": 28,
+        "xtick.labelsize": 28,
+        "ytick.labelsize": 28,
+        "figure.dpi": 600,
+        "savefig.dpi": 600,
+        "text.usetex": False
+    })
+
+    fig, ax = plt.subplots(figsize=(15, 9))
     
-    for i, ax in enumerate(axes):
-        # Extract components
-        y_true = u_true[:, i]
-        y_mean = u_pred_med[:, i]
-        y_lower = u_pred_lower[:, i]
-        y_upper = u_pred_upper[:, i]
-        
-        # Calculate 95% Confidence Interval (1.96 * std)
-        # ci_bound = 1.96 * y_std
-        lower_bound = y_lower
-        upper_bound = y_upper
-        ci_bound = y_upper - y_lower
-        
-        # Instead of y_mean and y_std, pass the raw samples (samples_array)
-        # lower_bound = np.quantile(samples_array, 0.025, axis=0)
-        # upper_bound = np.quantile(samples_array, 0.975, axis=0)
-        # y_mean = np.median(samples_array, axis=0) # Median is more robust for non-normal
-        # Calculate Coverage & R2
-        inside_ci = (y_true >= lower_bound) & (y_true <= upper_bound)
-        coverage_pct = np.mean(inside_ci) * 100
-        r2 = r2_score(y_true, y_mean)
-        
-        # Scatter with error bars
-        ax.errorbar(y_true, y_mean, yerr=ci_bound, fmt='o', ecolor='lightgray', 
-                    alpha=0.4, label='Pred Mean with 95% CI', markersize=3)
-        
-        # Identity line (45 degree)
-        limits = [
-            min(y_true.min(), y_mean.min()),
-            max(y_true.max(), y_mean.max())
-        ]
-        ax.plot(limits, limits, 'r--', linewidth=1.5, label='Perfect Match')
-        
-        # Formatting each subplot
-        ax.set_title(f'{labels[i]}\nCoverage: {coverage_pct:.2f}% | $R^2$: {r2:.4f}')
-        ax.set_xlabel(f'True $u_{labels[i][0].lower()}$')
-        ax.set_ylabel(f'Predicted $\mu_{labels[i][0].lower()}$')
-        ax.grid(True, linestyle=':', alpha=0.6)
-        ax.legend(prop={'size': 8})
+    # --- Component Extraction ---
+    ux_true, uy_true = u_true[:, 0], u_true[:, 1]
+    ux_med, uy_med = u_pred_med[:, 0], u_pred_med[:, 1]
+    
+    ux_lower, ux_upper = u_pred_lower[:, 0], u_pred_upper[:, 0]
+    uy_lower, uy_upper = u_pred_lower[:, 1], u_pred_upper[:, 1]
+    
+    # --- Statistics Calculation (Separate for X and Y) ---
+    def get_stats(true, med, low, high):
+        inside = (true >= low) & (true <= high)
+        cov = np.mean(inside) * 100
+        r2 = r2_score(true, med)
+        return cov, r2
+
+    cov_x, r2_x = get_stats(ux_true, ux_med, ux_lower, ux_upper)
+    cov_y, r2_y = get_stats(uy_true, uy_med, uy_lower, uy_upper)
+
+    # --- Error Bar Formatting ---
+    # Relative errors for Matplotlib yerr
+    ux_err = [ux_med - ux_lower, ux_upper - ux_med]
+    uy_err = [uy_med - uy_lower, uy_upper - uy_med]
+
+    # 1. Plot Displacement X (Blue, 'x' marker)
+    ax.errorbar(ux_true, ux_med, yerr=ux_err, fmt='x', color='blue', ecolor='blue', 
+                alpha=0.3, label=f'$u_x$ (Cov: {cov_x:.1f}%)', markersize=6, capsize=0)
+    
+    # 2. Plot Displacement Y (Red, 'o' marker)
+    ax.errorbar(uy_true, uy_med, yerr=uy_err, fmt='o', color='red', ecolor='red', 
+                alpha=0.3, label=f'$u_y$ (Cov: {cov_y:.1f}%)', markersize=4, capsize=0)
+
+    # 3. Identity line (Black dashed)
+    all_vals = np.concatenate([u_true.flatten(), u_pred_med.flatten()])
+    limits = [all_vals.min(), all_vals.max()]
+    ax.plot(limits, limits, 'k--', linewidth=2, label='Isoline', zorder=5)
+
+    # --- Annotation Box ---
+    stats_text = (f'Estimated Coverage $X$: {cov_x:.1f}%\n'
+                  f'Estimated Coverage $Y$: {cov_y:.1f}%\n'
+                  f'$R^2_X$: {r2_x:.4f}\n'
+                  f'$R^2_Y$: {r2_y:.4f}')
+    
+    ax.text(0.05, 0.95, stats_text, transform=ax.transAxes, fontsize=28, 
+            verticalalignment='top',
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8, edgecolor='gray'))
+
+    # Formatting
+    ax.set_xlabel('$u_{gt}$')
+    ax.set_ylabel('$u_{pred}$')
+    ax.grid(True, linestyle=':', alpha=0.6)
+    ax.legend(loc='lower right', frameon=True, fontsize=28)
+    
+    # Ticks limit
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
 
     plt.tight_layout()
     
     if save_path:
-        # Ensure the directory exists
-        if not os.path.exists(save_path):
-            os.makedirs(save_path, exist_ok=True)
-        
-        save_file = os.path.join(save_path, f"disp_r2_coverage_xy_{suffix}.png")
-        plt.savefig(save_file, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to {save_file}")
+        os.makedirs(save_path, exist_ok=True)
+        save_file = os.path.join(save_path, f"disp_r2_coverage_xy_{suffix}.pdf")
+        plt.savefig(save_file, bbox_inches='tight')
+        print(f"Plot saved to: {save_file}")
     
     plt.show()
 
@@ -379,6 +591,19 @@ def parse_args():
     return parser.parse_args()
 
 if __name__ == "__main__" :
+    # plt.rcParams.update({
+    # "font.family": "serif",
+    # "font.serif": ["Times New Roman", "DejaVu Serif"], # Falls back to DejaVu if Times isn't found
+    # "font.size": 14,                # Base font size
+    # "axes.titlesize": 22,           # Subplot titles
+    # "axes.labelsize": 20,           # X and Y labels
+    # "legend.fontsize": 16,          # Legend text
+    # "xtick.labelsize": 13,          # Axis tick numbers
+    # "ytick.labelsize": 13,
+    # "figure.dpi": 600,              # High resolution for the screen and save
+    # "savefig.dpi": 600,             # Ensures saved file is high quality
+    # "text.usetex": False            # Set to True only if you have a full LaTeX install
+    # })
     args = parse_args()
     # read file from coverage/{mat_model}_{disp_noise}_{load_noise}
     # material_model_name = "isihara"
@@ -430,8 +655,8 @@ if __name__ == "__main__" :
         [0.0707, 0.0707],
         # [0.05, 0.0866],
         [0.25, 0.75],
-        [0.5, 0.5],
-        [0.75, 0.25],
+        [0.6, 0.4],
+        # [0.75, 0.25],
         [1, 1]
 
 

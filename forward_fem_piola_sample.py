@@ -334,7 +334,7 @@ if __name__ == "__main__" :
     key = jax.random.PRNGKey(42)
     # asym_factor = 0.95
     # num_load_samples = 32
-    num_steps = 20
+    num_steps = 10
     # loads_top = jnp.linspace(0.0, 10, 10)
     # target_load = 10.0
     noise_std = load_noise * target_load
@@ -345,7 +345,8 @@ if __name__ == "__main__" :
     noisy_load_right_base = noisy_load_top_base * asym_factor
     # Baseline loads shape: (10, 2)
     loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
-
+    if material_model_name == "neohookean" or material_model_name == "gentthomas":
+        loads_noisy = loads_noisy[:-2]
     # 2. Calculate Noise Scale (1% of average load)
     # We take the mean of all non-zero load magnitudes to define the noise floor
 
@@ -404,18 +405,58 @@ if __name__ == "__main__" :
     #     pred_piola_stress_func = lambda f: model.piola(fto3x3(f), key)[:2, :2]
     #     pred_piola_stress_funcs.append(pred_piola_stress_func)
 
-    for i in range(n_sample) :
-        main_key, subkey = jr.split(main_key)
-        problem_pred = HyperElasticity(mesh = mesh,
-                                vec=2,
-                                dim=2,
-                                ele_type=ele_type,
-                                dirichlet_bc_info=dirichlet_bc_info,
-                                location_fns = [right,top],
-                                material_model_piola_stress=lambda f: model.piola(fto3x3(f), subkey)[:2, :2])
+    import os
+    import numpy as np
+    import jax.random as jr
+
+    # ... inside your main script ...
+
+    for i in range(n_sample):
+        success = False
+        tries = 0
+        max_tries = 5
         
-        u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
-        u_pred_samples.append(u_pred)
-        if not os.path.exists(os.path.join(save_path, "piola_samples")):
-            os.makedirs(os.path.join(save_path, "piola_samples"))
-        np.savez_compressed(os.path.join(save_path, f"piola_samples/u_pred_ps{i}.npz"), u_pred=u_pred, cells=cells, node_coords=node_coords, node_type=node_type)
+        while not success and tries < max_tries:
+            main_key, subkey = jr.split(main_key)
+            
+            # 1. Setup the problem with the new subkey
+            problem_pred = HyperElasticity(
+                mesh=mesh,
+                vec=2,
+                dim=2,
+                ele_type=ele_type,
+                dirichlet_bc_info=dirichlet_bc_info,
+                location_fns=[right, top],
+                material_model_piola_stress=lambda f: model.piola(fto3x3(f), subkey)[:2, :2]
+            )
+            
+            try:
+                # 2. Attempt the solve
+                print(f"Sample {i}: Attempt {tries + 1}/{max_tries}...")
+                u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
+                
+                # If we reach here, solve_fem succeeded
+                success = True 
+                
+            except Exception as e:
+                # 3. Handle failure
+                tries += 1
+                print(f"Simulation failed on sample {i}, try {tries}: {e}")
+                if tries >= max_tries:
+                    print(f"Max tries reached for sample {i}. Skipping or raising error.")
+                    # Option A: raise e (stops everything)
+                    # Option B: break (moves to next 'i' in n_sample)
+                    raise e 
+
+        # 4. Save and append only if successful
+        if success:
+            u_pred_samples.append(u_pred)
+            
+            sample_dir = os.path.join(save_path, "piola_samples")
+            if not os.path.exists(sample_dir):
+                os.makedirs(sample_dir)
+                
+            save_file = os.path.join(sample_dir, f"u_pred_ps{i}.npz")
+            np.savez_compressed(save_file, u_pred=u_pred, cells=cells, 
+                                node_coords=node_coords, node_type=node_type)
+            print(f"Sample {i} completed and saved.")

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=gpu_teaching
+#SBATCH --partition=gpu_irmb
 #SBATCH --nodes=1
 #SBATCH --time=20:00:00
 #SBATCH --job-name=gen-train-val
