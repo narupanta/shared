@@ -22,15 +22,9 @@ class GPRawParams(NamedTuple):
     raw_vol_u_mean: jnp.ndarray
     raw_vol_u_var: jnp.ndarray
     raw_vol_z: jnp.ndarray
+    raw_vol_kappa: jnp.ndarray
 
-    raw_c01: jnp.ndarray
-    raw_c02: jnp.ndarray
-    raw_c10: jnp.ndarray
-    raw_c11: jnp.ndarray
-    raw_c20: jnp.ndarray
-    raw_k: jnp.ndarray
-    raw_q: jnp.ndarray
-    raw_s: jnp.ndarray
+
 
 
     log_sigma_free_x: jnp.ndarray
@@ -38,24 +32,7 @@ class GPRawParams(NamedTuple):
     log_sigma_fix_x: jnp.ndarray
     log_sigma_fix_y: jnp.ndarray
 
-class RawMatParams(NamedTuple) :
-    raw_c01: jnp.ndarray
-    raw_c02: jnp.ndarray
-    raw_c10: jnp.ndarray
-    raw_c11: jnp.ndarray
-    raw_c20: jnp.ndarray    
-    raw_k: jnp.ndarray
-    raw_q: jnp.ndarray
-    raw_s: jnp.ndarray  
-class MatParams(NamedTuple) :
-    c01: jnp.ndarray
-    c02: jnp.ndarray
-    c10: jnp.ndarray
-    c11: jnp.ndarray
-    c20: jnp.ndarray
-    k: jnp.ndarray
-    q: jnp.ndarray
-    s: jnp.ndarray
+
 
 class GPParams(NamedTuple) :
     dev_ls: jnp.ndarray = None
@@ -69,15 +46,9 @@ class GPParams(NamedTuple) :
     vol_u_mean: jnp.ndarray = None
     vol_u_var: jnp.ndarray = None
     vol_z: jnp.ndarray = None
+    vol_kappa: jnp.ndarray = None
 
-    c01: jnp.ndarray = None
-    c02: jnp.ndarray = None
-    c10: jnp.ndarray = None
-    c11: jnp.ndarray = None
-    c20: jnp.ndarray = None
-    k: jnp.ndarray = None
-    q: jnp.ndarray = None
-    s: jnp.ndarray = None
+
 
     sigma_free_x: jnp.ndarray = None
     sigma_free_y: jnp.ndarray = None
@@ -101,40 +72,7 @@ class GPWeights(NamedTuple) :
     vol_Kzz_inv: jnp.ndarray
     vol_logterm: jnp.ndarray
 
-class Params(NamedTuple):
-    c01: jnp.ndarray
-    c02: jnp.ndarray
-    c10: jnp.ndarray
-    c11: jnp.ndarray
-    c20: jnp.ndarray
-    k: jnp.ndarray
-    q: jnp.ndarray
-    s: jnp.ndarray
-    c01_var: jnp.ndarray
-    c02_var: jnp.ndarray
-    c10_var: jnp.ndarray
-    c11_var: jnp.ndarray
-    c20_var: jnp.ndarray
-    k_var: jnp.ndarray
-    q_var: jnp.ndarray
-    s_var: jnp.ndarray  
-class RawParams(NamedTuple) :
-    raw_c01: jnp.ndarray
-    raw_c02: jnp.ndarray
-    raw_c10: jnp.ndarray
-    raw_c11: jnp.ndarray
-    raw_c20: jnp.ndarray
-    raw_k: jnp.ndarray
-    raw_q: jnp.ndarray
-    raw_s: jnp.ndarray
-    raw_c01_var: jnp.ndarray
-    raw_c02_var: jnp.ndarray
-    raw_c10_var: jnp.ndarray
-    raw_c11_var: jnp.ndarray
-    raw_c20_var: jnp.ndarray
-    raw_k_var: jnp.ndarray
-    raw_q_var: jnp.ndarray
-    raw_s_var: jnp.ndarray  
+
 
 
 class SyntheticData(NamedTuple) :

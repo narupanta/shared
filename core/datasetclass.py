@@ -1,14 +1,11 @@
 import os
-import json
-from abc import ABC, abstractmethod
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 jax.config.update("jax_enable_x64", True)
-from scipy.optimize import root
-from .material_models import BaseMaterialModel, get_material
+from .material_models import get_material
 from .utils import (
     B_func,
     I1_func,
@@ -16,169 +13,38 @@ from .utils import (
     I3_func,
     J_func,
     solve_for_coefficients_batched,
-    generate_random_F_plane_stress,
-    deformation_gradient_element,
-    detrend_3d_jax
+    deformation_gradient_element
 )
 
+from abc import ABC, abstractmethod
 
-
-class BaseDeformationDataset(ABC):
-    def __init__(self, n_samples, gamma_range, seed=None, noise=0.0, mat_model: BaseMaterialModel = None):
-        self.n_samples = n_samples
-        self.noise = noise
-        self.gamma_range = gamma_range
-        self.mat_model = mat_model
-        self.seed = seed
-    def solve_plane_stress(self, lambda1):
-        """
-        Solve for lambda2 and lambda3 such that sigma22 = sigma33 = 0.
-        Works for anisotropic materials.
-        """
-
-        def residuals(lams):
-            lambda2, lambda3 = lams
-
-            F = jnp.diag(jnp.array([lambda1, lambda2, lambda3]))
-            sigma = self.get_cauchy_stress(F[None, :, :])[0]  # (3,3)
-
-            return jnp.array([
-                sigma[1, 1],   # σ22 = 0
-                sigma[2, 2]    # σ33 = 0
-            ])
-
-        # good initial guess = isochoric lateral stretches
-        lam0 = jnp.array([
-            1.0 / jnp.sqrt(lambda1),
-            1.0 / jnp.sqrt(lambda1)
-        ])
-
-        sol =root(residuals, lam0, method="hybr")
-        return sol.x  # returns (lambda2, lambda3)
+class HyperelasticDataset(ABC):
     @abstractmethod
-    def get_F(self):
-        """Abstract method to generate deformation gradient F (3x3 tensors)."""
+    def get_data(self):
         pass
 
-    def get_invariants(self, deformation_gradient):
-        B_train = B_func(deformation_gradient)
-        I1_train = I1_func(B_train)
-        I2_train = I2_func(B_train)
-        I3_train = I3_func(B_train)
-        return jnp.stack([I1_train, I2_train, I3_train], axis=-1)
+class PrecomputedVFMDataset(HyperelasticDataset):
+    def __init__(self, data_path: os.PathLike):
+        self.data_path = data_path
+        
+    def get_data(self):
+        if not os.path.exists(self.data_path):
+            raise FileNotFoundError(f"Dataset not found at {self.data_path}")
+        return dict(jnp.load(self.data_path))
 
-    def get_phi(self, deformation_gradient):
-        Phi = self.mat_model.phi(deformation_gradient)
-        return Phi
+class DatasetFactory:
+    @staticmethod
+    def create(dataset_type: str, **kwargs) -> HyperelasticDataset:
+        if dataset_type == "dataset/precomputed_vfm":
+            return PrecomputedVFMDataset(kwargs["data_path"])
+        elif dataset_type == "benchmark":
+            return BenchmarkDataset(kwargs["data_dir"], kwargs["noise"], kwargs["mat_model"])
+        elif dataset_type == "traction":
+            return TractionDataset(kwargs.get("data_dir", "/home/mmdiscovery/shared/dataset/isihara_fix"))
+        else:
+            raise ValueError(f"Unknown dataset type: {dataset_type}")
 
-    def get_cauchy_stress(self, deformation_gradient):
-        """
-        Computes Cauchy stress σ = (1/J) * P * Fᵀ, where P = ∂Φ/∂F.
-        Uses JAX autograd.
-        """
-        def Phi_single(F):
-            F = F.reshape(3, 3)
-            return self.get_phi(F[None, :, :])[0]
-
-        # Compute Piola stress P = dΦ/dF for each sample
-        Phi_grad_fn = jax.vmap(jax.grad(Phi_single))
-        Piola = Phi_grad_fn(deformation_gradient)
-        # Piola = self.mat_model.P(deformation_gradient)
-
-        J = J_func(deformation_gradient)
-        sigma = jnp.einsum('nij,nkj->nik', Piola, deformation_gradient) / J[:, None, None]
-
-        if self.noise > 0:
-            key = jax.random.PRNGKey(self.seed if self.seed is not None else 0)
-            noise = jax.random.normal(key, sigma.shape) * self.noise * sigma
-            sigma = sigma + noise
-
-        return sigma
-    def get_piola_stress(self, deformation_gradient) :
-        sigma = self.get_cauchy_stress(deformation_gradient)
-        J = J_func(deformation_gradient)
-        piola = J[:, None, None] * sigma @ jnp.linalg.inv(jnp.swapaxes(deformation_gradient, -2, -1))
-        return piola
-    def get_coeffs(self, deformation_gradient):
-        B_train = B_func(deformation_gradient)
-        sigma = self.get_cauchy_stress(deformation_gradient)
-
-        # Eigenvalues
-        B_eig_val = jnp.real(jnp.linalg.eigvalsh(B_train))
-        sigma_eig_val = jnp.real(jnp.linalg.eigvalsh(sigma))
-
-        coeffs, _ = solve_for_coefficients_batched(B_eig_val, sigma_eig_val)
-        return coeffs
-
-
-# ----------------------------
-#   DEFORMATION MODES
-# ----------------------------
-
-class RandomFGenerator(BaseDeformationDataset):
-    def get_F(self):
-        F_np = generate_random_F_plane_stress(
-            self.n_samples, self.gamma_range, self.seed
-        )
-        return jnp.array(F_np)
-
-
-class UniaxialGenerator(BaseDeformationDataset):
-    # def get_F(self):
-    #     gamma = jnp.linspace(self.gamma_range[0], self.gamma_range[1], self.n_samples)
-    #     F = jnp.zeros((self.n_samples, 3, 3))
-    #     F = F.at[:, 0, 0].set(gamma)
-    #     F = F.at[:, 1, 1].set(1.0)
-    #     F = F.at[:, 2, 2].set(1.0)
-    #     return F
-    def get_F(self):
-        gamma = jnp.linspace(self.gamma_range[0],
-                             self.gamma_range[1],
-                             self.n_samples)
-
-        F_out = jnp.zeros((self.n_samples, 3, 3))
-
-        for i, lam1 in enumerate(gamma):
-            lam2, lam3 = self.solve_plane_stress(lam1)
-
-            F = jnp.diag(jnp.array([lam1, lam2, lam3]))
-            F_out = F_out.at[i].set(F)
-
-        return F_out
-
-
-class BiaxialGenerator(BaseDeformationDataset):
-    def get_F(self):
-        gamma = jnp.linspace(self.gamma_range[0], self.gamma_range[1], self.n_samples)
-        F = jnp.zeros((self.n_samples, 3, 3))
-        F = F.at[:, 0, 0].set(gamma)
-        F = F.at[:, 1, 1].set(gamma)
-        F = F.at[:, 2, 2].set(1.0)
-        return F
-
-
-class PureShearGenerator(BaseDeformationDataset):
-    def get_F(self):
-        gamma = jnp.linspace(self.gamma_range[0], self.gamma_range[1], self.n_samples)
-        F = jnp.zeros((self.n_samples, 3, 3))
-        F = F.at[:, 0, 0].set(gamma)
-        F = F.at[:, 1, 1].set(1.0 / gamma)
-        F = F.at[:, 2, 2].set(1.0)
-        return F
-
-
-class SimpleShearGenerator(BaseDeformationDataset):
-    def get_F(self):
-        gamma = jnp.linspace(self.gamma_range[0], self.gamma_range[1], self.n_samples)
-        F = jnp.zeros((self.n_samples, 3, 3))
-        F = F.at[:, 0, 0].set(1.0)
-        F = F.at[:, 1, 1].set(1.0)
-        F = F.at[:, 2, 2].set(1.0)
-        F = F.at[:, 0, 1].set(gamma)
-        F = F.at[:, 1, 0].set(0.0)
-        return F
-    
-class BenchmarkDataset:
+class BenchmarkDataset(HyperelasticDataset):
     def __init__(self, data_dir: os.PathLike, noise: str, mat_model: str):
         self.data_dir = data_dir
         self.noise = noise
@@ -254,8 +120,12 @@ class BenchmarkDataset:
         data = dict(F = F, P = P_from_mm, sigma = sigma, coeffs = coeffs, invariants = invariants, 
                     cells = cells, coords_elems = coords_elems, disp_elems = disp_elems, bc = bc, reaction_forces = reaction_forces)
         return data
+        
+    def get_data(self):
+        # Implementation for the full dataset retrieval if needed
+        return [self[i] for i in range(len(self))]
 
-class TractionDataset :
+class TractionDataset(HyperelasticDataset):
     def __init__(self, data_dir: os.PathLike = "/home/mmdiscovery/shared/dataset/isihara_fix"):
         self.data_dir = data_dir
         self.files = os.listdir(self.data_dir)
@@ -264,6 +134,9 @@ class TractionDataset :
     def __getitem__(self, idx) :
         data = np.load(os.path.join(self.data_dir, self.files[idx]))
         return data
+
+    def get_data(self):
+        return [self[i] for i in range(len(self))]
 
         
 # Example usage

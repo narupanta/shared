@@ -1,0 +1,234 @@
+import sys
+import os
+import argparse
+import numpy as np
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import jax
+import jax.numpy as jnp
+from core.model import SparseHyperelasticityGP
+from core.dataclass import GPRawParams
+from core.utils import fto3x3, farthest_point_sampling
+from core.features import IsotropicFeatureExtractor
+
+def generate_standard_modes(num_points=32, max_gamma=1.0):
+    gamma = np.linspace(0.0, max_gamma, num_points)
+    
+    F_all = np.zeros((6, num_points, 2, 2))
+    def set_F(f11, f22, f12=0.0):
+        arr = np.zeros((num_points, 2, 2))
+        arr[:, 0, 0] = f11
+        arr[:, 1, 1] = f22
+        arr[:, 0, 1] = f12
+        return arr
+
+    F_all[0] = set_F(1 + gamma, 1.0)            
+    F_all[1] = set_F(1 + gamma, 1 + gamma)    
+    F_all[2] = set_F(1 + gamma, 1/(1 + gamma)) 
+    F_all[3] = set_F(1/(1 + gamma), 1.0)       
+    F_all[4] = set_F(1/(1 + gamma), 1/(1 + gamma)) 
+    F_all[5] = set_F(1.0, 1.0, f12=gamma)
+    
+    # We want to return a flat array (192, 2, 2)
+    return F_all.reshape(-1, 2, 2)
+
+def generate_standard_modes_interp(num_points=32, max_search_gamma=1.0, min_dev=None, max_dev=None, min_vol=None, max_vol=None):
+    search_points = 2000
+    gamma_search = np.linspace(0.0, max_search_gamma, search_points)
+    
+    def get_mode_F(mode_idx, g_arr):
+        n = len(g_arr)
+        arr = np.zeros((n, 2, 2))
+        arr[:, 0, 0] = 1.0
+        arr[:, 1, 1] = 1.0
+        if mode_idx == 0:
+            arr[:, 0, 0] = 1 + g_arr
+        elif mode_idx == 1:
+            arr[:, 0, 0] = 1 + g_arr
+            arr[:, 1, 1] = 1 + g_arr
+        elif mode_idx == 2:
+            arr[:, 0, 0] = 1 + g_arr
+            arr[:, 1, 1] = 1.0 / (1 + g_arr)
+        elif mode_idx == 3:
+            arr[:, 0, 0] = 1.0 / (1 + g_arr)
+        elif mode_idx == 4:
+            arr[:, 0, 0] = 1.0 / (1 + g_arr)
+            arr[:, 1, 1] = 1.0 / (1 + g_arr)
+        elif mode_idx == 5:
+            arr[:, 0, 1] = g_arr
+        return arr
+
+    F_sampled = np.zeros((6, num_points, 2, 2))
+    mode_names = ["Uniaxial Tension", "Equibiaxial Tension", "Pure Shear", 
+                  "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
+                  
+    true_min_dev = np.array(min_dev) - 1e-4
+    true_max_dev = np.array(max_dev) + 1e-4
+    true_min_vol = np.array(min_vol) - 1e-4
+    true_max_vol = np.array(max_vol) + 1e-4
+    
+    extractor = IsotropicFeatureExtractor()
+    
+    print("\n--- Dynamically determining interpolation transition points (gamma in [0, 1]) ---")
+    for i in range(6):
+        F_search_2x2 = get_mode_F(i, gamma_search)
+        F_search_3x3 = np.zeros((search_points, 3, 3))
+        F_search_3x3[:, :2, :2] = F_search_2x2
+        F_search_3x3[:, 2, 2] = 1.0
+        
+        dev_m, vol_m = jax.vmap(extractor.extract)(jnp.array(F_search_3x3))
+        dev_m, vol_m = np.array(dev_m), np.array(vol_m)
+        
+        in_bounds_dev0 = (dev_m[:, 0] >= true_min_dev[0]) & (dev_m[:, 0] <= true_max_dev[0])
+        in_bounds_dev1 = (dev_m[:, 1] >= true_min_dev[1]) & (dev_m[:, 1] <= true_max_dev[1])
+        in_bounds_vol = (vol_m[:, 0] >= true_min_vol[0]) & (vol_m[:, 0] <= true_max_vol[0])
+        in_bounds = in_bounds_dev0 & in_bounds_dev1 & in_bounds_vol
+        
+        if not np.all(in_bounds):
+            exit_idx = np.argmax(~in_bounds)
+            trans_g = gamma_search[exit_idx]
+            if exit_idx == 0:
+                trans_g = gamma_search[1]
+            print(f"Mode {i} ({mode_names[i]}): Interpolation region ends at gamma = {trans_g:.4f}")
+        else:
+            trans_g = max_search_gamma
+            print(f"Mode {i} ({mode_names[i]}): Entirely within interpolation up to gamma = {trans_g:.4f}")
+            
+        gamma_mode = np.linspace(0.0, trans_g, num_points)
+        F_sampled[i] = get_mode_F(i, gamma_mode)
+        
+    return F_sampled.reshape(-1, 2, 2)
+
+def invariants(f):
+    F = fto3x3(f)
+    C = F.T @ F
+    I1 = jnp.trace(C)
+    I2 = 0.5 * (I1**2 - jnp.trace(C @ C))
+    J = jnp.linalg.det(F)
+    return jnp.array([I1, I2, J])
+
+jax.config.update("jax_enable_x64", True)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--saved_model_dir", type=str, required=True)
+    parser.add_argument("--max_gamma", type=float, default=0.8)
+    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all"], help="Sample deformations from standard modes (with or without interpolation clipping), extraction dataset with FPS, or all extraction dataset points.")
+    parser.add_argument("--num_points", type=int, default=192, help="Number of points to evaluate GP over.")
+    parser.add_argument("--export_subfolder", type=str, default="", help="Custom output subfolder for exported PyTorch matrices.")
+    args = parser.parse_args()
+
+    best_params_dict = np.load(os.path.join(args.saved_model_dir, "best_params.npy"), allow_pickle=True).item()
+    gp_params = GPRawParams(**best_params_dict)
+    I_z = jnp.load(os.path.join(args.saved_model_dir, "I_z.npy"))
+    
+    dev_z = I_z[:, :2]
+    vol_z = I_z[:, 2:]
+    min_dev = jnp.min(dev_z, axis=0)
+    min_vol = jnp.min(vol_z, axis=0)
+    max_dev = jnp.max(dev_z, axis=0)
+    max_vol = jnp.max(vol_z, axis=0)
+    
+    gp_model = SparseHyperelasticityGP(gp_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=1.0)
+    
+    # Generate points
+    if args.sample_mode in ["dataset_f", "dataset_all"]:
+        model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
+        parts = model_folder_name.split('_')
+        if len(parts) >= 6:
+            ugp_model_name = parts[1]
+            disp_noise = parts[2]
+            load_noise = parts[3]
+            target_load = parts[4]
+            asym_factor = parts[5]
+            dataset_filename = f"{ugp_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"
+        else:
+            raise ValueError(f"Could not parse dataset parameters from model folder name: {model_folder_name}")
+            
+        prep_dataset_path = os.path.join("dataset/preprocessed/syn_f", dataset_filename)
+        if not os.path.exists(prep_dataset_path):
+            prep_dataset_path = os.path.join("dataset/precomputed_vfm", dataset_filename)
+            
+        if not os.path.exists(prep_dataset_path):
+            raise FileNotFoundError(f"Dataset file not found at {prep_dataset_path}")
+            
+        print(f"Loading direct extraction input data from {prep_dataset_path}...")
+        prep_data = np.load(prep_dataset_path)
+        F_all_steps_2x2 = prep_data["F"]
+        
+        # Filter to strictly the load steps that were used during unsupervised GP extraction
+        log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")
+        load_steps = None
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8") as lf:
+                first_line = lf.readline()
+                if "[" in first_line and "]" in first_line:
+                    steps_str = first_line.split("]")[0].split("[")[1].strip()
+                    if steps_str:
+                        load_steps = [int(x.strip()) for x in steps_str.split(",") if x.strip().isdigit()]
+        
+        if load_steps and len(load_steps) > 0 and max(load_steps) < F_all_steps_2x2.shape[0]:
+            print(f"Filtering dataset deformations exclusively to extraction training load steps: {load_steps}")
+            F_train_full_2x2 = F_all_steps_2x2[load_steps]
+        else:
+            print(f"Warning: Could not parse specific valid load steps from {log_file}; using default extraction load steps [2, 10, 20].")
+            default_steps = [2, 10, 20]
+            valid_steps = [s for s in default_steps if s < F_all_steps_2x2.shape[0]]
+            F_train_full_2x2 = F_all_steps_2x2[valid_steps] if len(valid_steps) > 0 else F_all_steps_2x2
+            
+        F_flat_2x2 = F_train_full_2x2.reshape(-1, 2, 2)
+        
+        if args.sample_mode == "dataset_all":
+            print(f"Using exactly ALL {len(F_flat_2x2)} observed deformation points from extraction load steps (no FPS!).")
+            f3x3_flat_2x2 = F_flat_2x2
+            export_subfolder = "pytorch_export_dataset_all"
+        else:
+            print(f"Applying Farthest Point Sampling (FPS) over {len(F_flat_2x2)} observed deformations...")
+            pts = jnp.array(F_flat_2x2.reshape(-1, 4), dtype=jnp.float64)
+            if len(F_flat_2x2) <= args.num_points:
+                indices = np.arange(len(F_flat_2x2))
+            else:
+                indices = np.array(farthest_point_sampling(pts, args.num_points))
+                
+            f3x3_flat_2x2 = F_flat_2x2[indices]
+            export_subfolder = "pytorch_export_dataset_f"
+            print(f"Sampled {len(indices)} deformations directly from extraction dataset via Farthest Point Sampling.")
+    elif args.sample_mode == "standard_interp":
+        print("Generating standard deformation modes strictly within GP interpolation bounds (up to gamma = 1.0)...")
+        f3x3_flat_2x2 = generate_standard_modes_interp(num_points=max(1, args.num_points // 6), max_search_gamma=1.0, min_dev=min_dev, max_dev=max_dev, min_vol=min_vol, max_vol=max_vol)
+        export_subfolder = "pytorch_export_standard_interp"
+    else:
+        f3x3_flat_2x2 = generate_standard_modes(num_points=max(1, args.num_points // 6), max_gamma=args.max_gamma)
+        export_subfolder = f"pytorch_export_standard_g{args.max_gamma}" if args.max_gamma != 0.8 else "pytorch_export"
+    
+    if args.export_subfolder:
+        export_subfolder = args.export_subfolder
+    
+    # Pad to 3x3 Plane Strain!
+    f3x3_flat = np.zeros((f3x3_flat_2x2.shape[0], 3, 3))
+    for i in range(f3x3_flat_2x2.shape[0]):
+        f3x3_flat[i, :2, :2] = f3x3_flat_2x2[i]
+        f3x3_flat[i, 2, 2] = 1.0
+        
+    f3x3_flat = jnp.array(f3x3_flat)
+    
+    mean_psi = gp_model.psi_gp_mean(f3x3_flat)
+    cov_psi = gp_model.psi_joint_cov(f3x3_flat)
+    
+    mean_psi = np.array(mean_psi)
+    cov_psi = np.array(cov_psi)
+    batch_size = mean_psi.shape[0]
+    cov_psi = cov_psi + 1e-6 * np.eye(batch_size)
+
+    # Save to disk
+    out_dir = os.path.join(args.saved_model_dir, export_subfolder)
+    os.makedirs(out_dir, exist_ok=True)
+    
+    np.save(os.path.join(out_dir, "mean_psi.npy"), np.array(mean_psi))
+    np.save(os.path.join(out_dir, "cov_psi.npy"), np.array(cov_psi))
+    np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
+    
+    print(f"Exported GP Mean ({mean_psi.shape}) and Cov ({cov_psi.shape}) to {out_dir}")
+
+if __name__ == "__main__":
+    main()

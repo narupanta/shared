@@ -43,12 +43,13 @@ class BaseMaterialModel(ABC):
 
     @abstractmethod
     def psi(self, F: jnp.ndarray) -> jnp.ndarray:
-        """
-        Strain energy for a single sample F (shape (3,3)) or for batched F (...,3,3).
-        Must return a scalar (0-d array) per sample (or an array with leading batch dims).
-        If you accidentally return an array, this base class will sum it before differentiating.
-        """
         raise NotImplementedError
+
+    def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
+        return self.psi(F) # Default fallback
+
+    def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
+        return jnp.zeros_like(self.psi(F)) # Default fallback
 
     def _make_grad_fns(self) -> None:
         """
@@ -198,22 +199,33 @@ class NeoHookean(BaseMaterialModel):
 
 @register_material("isihara")
 class Isihara(BaseMaterialModel):
-    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
+    def __init__(self, c10=0.5, c01=1.0, c20=1.0, d1=1.5, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
-        self.c1 = c1
-        self.c2 = c2
+        self.c10 = c10
+        self.c01 = c01
+        self.c20 = c20
+        self.d1 = d1
 
     def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+        return self.psi_dev(F) + self.psi_vol(F)
+
+    def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
         C = C_func(F)
         I1 = I1_func(C)
         I2 = I2_func(C)
         I3 = I3_func(C)
         I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
-        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
-        term2 = (I3_safe**(-2/3) * I2 - 3)
-        term3 = (I3_safe**(-1/3) * I1 - 3)**2
-        term4 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
-        return term1 + term2 + term3 + term4
+        
+        term1 = self.c10 * (I3_safe**(-1/3) * I1 - 3)
+        term2 = self.c01 * (I3_safe**(-2/3) * I2 - 3)
+        term3 = self.c20 * (I3_safe**(-1/3) * I1 - 3)**2
+        return term1 + term2 + term3
+
+    def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
+        C = C_func(F)
+        I3 = I3_func(C)
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        return self.d1 * (jnp.sqrt(I3_safe) - 1)**2
 
 @register_material("gentthomas")
 class GentThomas(BaseMaterialModel):
@@ -223,6 +235,9 @@ class GentThomas(BaseMaterialModel):
         self.c2 = c2
 
     def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+        return self.psi_dev(F) + self.psi_vol(F)
+
+    def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
         C = C_func(F)
         I1 = I1_func(C)
         I2 = I2_func(C)
@@ -230,8 +245,13 @@ class GentThomas(BaseMaterialModel):
         I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
         term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
         term2 = jnp.log(I3_safe**(-2/3) * I2/3)
-        term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
-        return term1 + term2 + term3
+        return term1 + term2
+
+    def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
+        C = C_func(F)
+        I3 = I3_func(C) 
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        return self.c2 * (jnp.sqrt(I3_safe) - 1)**2
 
 @register_material("neohookean4")
 class NeoHookean4(BaseMaterialModel):
@@ -270,3 +290,126 @@ class HainesWilson(BaseMaterialModel):
         term5 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
         return term1 + term2 + term3 + term4 + term5
 
+@register_material("gmr")
+class GeneralizedMooneyRivlin(BaseMaterialModel):
+    def __init__(self, dev_params=None, vol_params=None, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        # dev_params: [C10, C01, C20, C11, C02, C30, C21, C12, C03]
+        # vol_params: [D1, D2, D3]
+        if dev_params is None:
+            dev_params = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            vol_params = [1.5, 0.0, 0.0]
+        self.dev_params = dev_params
+        self.vol_params = vol_params
+
+    def _eval_terms(self, F: jnp.ndarray):
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I1 = I1_func(C)
+        I2 = I2_func(C)
+        I3 = I3_func(C)
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        i1_dev = I3_safe**(-1/3) * I1
+        i2_dev = I3_safe**(-2/3) * I2
+
+        X = i1_dev - 3.0
+        Y = i2_dev - 3.0
+        
+        # Deviatoric Terms (Order 3)
+        dev_terms = (
+            self.dev_params[0] * X + 
+            self.dev_params[1] * Y + 
+            self.dev_params[2] * X**2 + 
+            self.dev_params[3] * X * Y + 
+            self.dev_params[4] * Y**2 +
+            self.dev_params[5] * X**3 + 
+            self.dev_params[6] * (X**2) * Y + 
+            self.dev_params[7] * X * (Y**2) +
+            self.dev_params[8] * Y**3
+        )
+        
+        J = jnp.sqrt(I3_safe)
+        J_minus_1 = J - 1.0
+
+        # Volumetric Terms (Order 3)
+        vol_terms = (
+            self.vol_params[0] * J_minus_1**2 + 
+            self.vol_params[1] * J_minus_1**4 +
+            self.vol_params[2] * J_minus_1**6
+        )
+        
+        return dev_terms, vol_terms
+
+    def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
+        dev_terms, _ = self._eval_terms(F)
+        return dev_terms
+
+    def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
+        _, vol_terms = self._eval_terms(F)
+        return vol_terms
+
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+        dev_terms, vol_terms = self._eval_terms(F)
+        return dev_terms + vol_terms
+
+
+@register_material("nh")
+class NeoHookeanGMR(GeneralizedMooneyRivlin):
+    def __init__(self, c10=0.5, d1=1.5, jit_P: bool = True):
+        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        vol_params = [d1, 0.0, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
+
+
+
+@register_material("ogden")
+class Ogden(BaseMaterialModel):
+    def __init__(self, mu_params, alpha_params, vol_params, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        # mu_params: [mu1, mu2, mu3]
+        # alpha_params: [alpha1, alpha2, alpha3]
+        # vol_params: [D1, D2, D3]
+        self.mu_params = mu_params
+        self.alpha_params = alpha_params
+        self.vol_params = vol_params
+
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I3 = I3_func(C)
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        
+        # Calculate eigenvalues of C to get lambda^2
+        # Use eigvalsh as C is symmetric
+        eigenvalues = jnp.linalg.eigvalsh(C)
+        eigenvalues = jnp.clip(eigenvalues, 1.0e-8, 1.0e8)
+        lam = jnp.sqrt(eigenvalues)
+        
+        # Deviatoric stretches
+        lam_bar = lam * I3_safe**(-1/6)
+        
+        dev_terms = 0.0
+        for i in range(3):
+            # To avoid numerical issues when alpha -> 0 or lam_bar -> 0
+            val = (lam_bar[0]**self.alpha_params[i] + lam_bar[1]**self.alpha_params[i] + lam_bar[2]**self.alpha_params[i] - 3.0)
+            # Use jnp.where or similar if alpha can exactly be zero, but we assume alpha != 0
+            alpha_safe = jnp.where(jnp.abs(self.alpha_params[i]) < 1e-6, 1e-6 * jnp.sign(self.alpha_params[i] + 1e-9), self.alpha_params[i])
+            dev_terms += (self.mu_params[i] / alpha_safe) * val
+            
+        J = jnp.sqrt(I3_safe)
+        J_minus_1 = J - 1.0
+
+        vol_terms = (
+            self.vol_params[0] * J_minus_1**2 + 
+            self.vol_params[1] * J_minus_1**4 +
+            self.vol_params[2] * J_minus_1**6
+        )
+        
+        return dev_terms + vol_terms

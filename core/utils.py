@@ -68,45 +68,6 @@ def solve_for_coefficients_batched(lambda_B, lambda_sigma):
     coefficients_c = jnp.einsum("bij,bj->bi", V_pinv, lambda_sigma)
     return coefficients_c, V
 
-# -------------------------------
-# Generate random F tensors (Plane Stress)
-# -------------------------------
-
-def generate_random_F_plane_stress(n_samples, lambda_range=(0.5, 2.5), seed=None):
-    """
-    Generates n_samples of 3x3 Deformation Gradient (F) tensors 
-    constrained to 2D Plane Strain (F33=1, F_i3=0, F_3i=0 for i=1,2).
-    """
-    key = jax.random.PRNGKey(seed if seed is not None else 0)
-    low, high = lambda_range
-    n_shear = n_samples // 10
-
-    def single_sample(key):
-        k1, k2 = jax.random.split(key)
-        lambdas_2D = jax.random.uniform(k1, (2,), minval=low, maxval=high)
-        V_2D = jnp.diag(lambdas_2D)
-        theta = jax.random.uniform(k2, (), minval=0, maxval=2 * jnp.pi)
-        R_2D = jnp.array([
-            [jnp.cos(theta), -jnp.sin(theta)],
-            [jnp.sin(theta), jnp.cos(theta)]
-        ])
-        F_2D = R_2D @ V_2D
-        F = jnp.eye(3)
-        F = F.at[:2, :2].set(F_2D)
-        return F
-
-    # Generate all random samples
-    keys = jax.random.split(key, n_samples)
-    F_samples = jax.vmap(single_sample)(keys)
-
-    # Add shear states
-    key_shear = jax.random.split(key, n_shear + 1)[-1]
-    gamma_shear = jax.random.uniform(key_shear, (n_shear,), minval=low, maxval=high)
-    F_shear = jnp.tile(jnp.eye(3), (n_shear, 1, 1))
-    F_shear = F_shear.at[:, 0, 1].set(gamma_shear)
-
-    return jnp.concatenate([F_samples, F_shear], axis=0)
-
 
 from jax import vmap
 
@@ -168,17 +129,6 @@ def deformation_gradient_element(coords_elem, disp_elem):
     F = jnp.eye(2) + gradu
     return F, dNdx
 
-def detrend_3d_jax(X, y):
-    N = X.shape[0]
-    X_design = jnp.hstack([jnp.ones((N, 1)), X])  # shape (N, 4)
-
-    # Solve via lstsq
-    beta, residuals, rank, s = jnp.linalg.lstsq(X_design, y)
-
-    trend = X_design @ beta
-    y_detrended = y - trend
-
-    return y_detrended, beta, trend
 
 def calculate_min_ls(z):
     # For a 2D/3D point cloud, a quick way is to use the 

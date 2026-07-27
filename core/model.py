@@ -1,53 +1,54 @@
-
-from .utils import *
-from .datasetclass import *
-from .dataclass import *
-from .kernel import *
+import jax
 import jax.numpy as jnp
-from typing import NamedTuple
-import jax  
-
 from jax import random, vmap, grad, jit
 
+from .kernel import rbf
+from .dataclass import EnergyDist, StressDist, GPParams, GPWeights
+from .features import IsotropicFeatureExtractor
+
 class SparseHyperelasticityGP:
-    def __init__(self, raw_params, I_z: jnp.ndarray, min_dev, min_vol, max_dev, max_vol, sampling_mode = "pws", beta = 1.0, L=200, is_include_prior_mean = False):
+    """
+    Sparse Gaussian Process model for hyperelasticity.
+    Uses pathwise sampling and Matheron's rule to condition on inducing points.
+    Strictly assumes a zero-mean prior for the strain energy density components.
+    """
+    def __init__(self, raw_params, I_z: jnp.ndarray, min_dev, min_vol, max_dev, max_vol, sampling_mode="pws", beta=1.0, L=200, feature_extractor=None):
+        self.feature_extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
         # 1. Inducing points split
-        self.dev_z = I_z[:, :2]
-        self.vol_z = I_z[:, 2:]
-        self.min_dev = min_dev
-        self.max_dev = max_dev
-
-        self.min_vol = min_vol
-        self.max_vol = max_vol
+        self.dev_z = jnp.asarray(I_z[:, :2], dtype=jnp.float64)
+        self.vol_z = jnp.asarray(I_z[:, 2:], dtype=jnp.float64)
+        self.min_dev = jnp.asarray(min_dev, dtype=jnp.float64)
+        self.max_dev = jnp.asarray(max_dev, dtype=jnp.float64)
+        self.min_vol = jnp.asarray(min_vol, dtype=jnp.float64)
+        self.max_vol = jnp.asarray(max_vol, dtype=jnp.float64)
+        
         self.sampling_mode = sampling_mode
-        self.norm_dev = self.norm_dev(self.dev_z)
-        self.norm_vol = self.norm_vol(self.vol_z)
-
-        self.L = L  # Number of Random Fourier Features
+        self.L = L  # Number of Random Fourier Features for pathwise sampling
         self.beta = beta
-        self.is_include_prior_mean = is_include_prior_mean
+        
         # 2. Setup Parameters and Weights
         self.params = self.load_params(raw_params)
         self.gpweight = self.precompute_weights(raw_params)
 
-    def norm_dev(self, z) :
-        return (z - self.min_dev)/(self.max_dev - self.min_dev)
-    def norm_vol(self, z) :
-        return (z - self.min_vol)/(self.max_vol - self.min_vol)
+    # ---------------------------------------------------------
+    # 1. Parameter Management
+    # ---------------------------------------------------------
+    def load_params(self, p) -> GPParams:
+        """Applies physical constraints (e.g., positivity via softplus/exp) to raw parameters."""
+        def to_f64(x):
+            return jnp.asarray(x, dtype=jnp.float64)
 
-    def load_params(self, p):
-        """Applies physical constraints to raw parameters."""
-        dev_mu = jax.nn.softplus(p.raw_dev_u_mean)
-        vol_mu = jax.nn.softplus(p.raw_vol_u_mean)
-        dev_var = jax.nn.softplus(p.raw_dev_u_var)
-        vol_var = jax.nn.softplus(p.raw_vol_u_var)
+        dev_mu = to_f64(jax.nn.softplus(p.raw_dev_u_mean))
+        vol_mu = to_f64(jax.nn.softplus(p.raw_vol_u_mean))
+        dev_var = to_f64(jax.nn.softplus(p.raw_dev_u_var))
+        vol_var = to_f64(jax.nn.softplus(p.raw_vol_u_var))
 
         # Force anchor points (First inducing point at zero energy)
-        dev_z = jax.nn.softplus(p.raw_dev_z) + jnp.array([3.0, 3.0])
-        vol_z = jax.nn.softplus(p.raw_vol_z)
+        dev_z = to_f64(jax.nn.softplus(p.raw_dev_z)) + to_f64(jnp.array([3.0, 3.0]))
+        vol_z = to_f64(jax.nn.softplus(p.raw_vol_z))
 
-        dev_z = dev_z.at[0].set(jnp.array([3.0, 3.0]))
-        vol_z = vol_z.at[0].set(jnp.array([1.0]))
+        dev_z = dev_z.at[0].set(to_f64(jnp.array([3.0, 3.0])))
+        vol_z = vol_z.at[0].set(to_f64(jnp.array([1.0])))
 
         dev_u_mean = dev_mu.at[0].set(0.0)
         dev_u_var  = dev_var.at[0].set(1e-8)
@@ -55,32 +56,35 @@ class SparseHyperelasticityGP:
         vol_u_var  = vol_var.at[0].set(1e-8)
 
         return GPParams(
-            dev_ls=self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls),
-            # dev_ls=jnp.array([2.0, 2.0]),
-
-            dev_sig=jnp.exp(p.raw_dev_sig),
+            dev_ls=to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls)),
+            dev_sig=to_f64(jnp.exp(p.raw_dev_sig)),
             dev_u_mean=dev_u_mean,
             dev_u_var=dev_u_var,
             dev_z=dev_z,
 
-            vol_ls= self.max_vol * 2 * jax.nn.sigmoid(p.raw_vol_ls),
-            # vol_ls=jnp.array([1.0]),
-
-            vol_sig=jnp.exp(p.raw_vol_sig),
+            vol_ls=to_f64(self.max_vol * 2 * jax.nn.sigmoid(p.raw_vol_ls)),
+            vol_sig=to_f64(jnp.exp(p.raw_vol_sig)),
             vol_u_mean=vol_u_mean,
             vol_u_var=vol_u_var,
-            vol_z = vol_z,
-            **{k: jax.nn.softplus(getattr(p, f"raw_{k}")) for k in ['c01', 'c02', 'c10', 'c11', 'c20', 'k', 'q', "s"]},
-            sigma_free_x=jnp.exp(p.log_sigma_free_x),
-            sigma_free_y=jnp.exp(p.log_sigma_free_y),
-            sigma_fix_x=jnp.exp(p.log_sigma_fix_x),
-            sigma_fix_y=jnp.exp(p.log_sigma_fix_y)
+            vol_z=vol_z,
+            vol_kappa=to_f64(jax.nn.softplus(p.raw_vol_kappa)),
+
+            sigma_free_x=to_f64(jnp.exp(p.log_sigma_free_x)),
+            sigma_free_y=to_f64(jnp.exp(p.log_sigma_free_y)),
+            sigma_fix_x=to_f64(jnp.exp(p.log_sigma_fix_x)),
+            sigma_fix_y=to_f64(jnp.exp(p.log_sigma_fix_y))
         )
 
-    def _compute_component_weights(self, z, u_mean, u_var, ls, sig, trend_fn):
-        Kzz = rbf(z, z, sig, ls) + 1e-6 * jnp.eye(z.shape[0])
-        K_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0]))
-        v_diff = u_mean - vmap(trend_fn)(z)
+    # ---------------------------------------------------------
+    # 2. Core GP Mathematics & Weight Precomputation
+    # ---------------------------------------------------------
+    def _compute_component_weights(self, z, u_mean, u_var, ls, sig):
+        """Helper to precompute reusable covariance matrices and vectors for GP."""
+        Kzz = rbf(z, z, sig, ls) + 1e-6 * jnp.eye(z.shape[0], dtype=jnp.float64)
+        K_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0], dtype=jnp.float64))
+        
+        # We strictly assume a zero-mean prior, so v_diff is just u_mean - 0
+        v_diff = u_mean
         
         M_mat = K_inv @ (Kzz - jnp.diag(u_var)) @ K_inv.T
         trace_term = jnp.trace(K_inv @ jnp.diag(u_var))
@@ -90,17 +94,10 @@ class SparseHyperelasticityGP:
         return Kzz, K_inv, v_diff, trace_term, mahalanobis_term, M_mat, log_term
 
     def precompute_weights(self, params) -> GPWeights:
+        """Precomputes weights for both deviatoric and volumetric components."""
         p = self.load_params(params)
-        # dev_z = self.dev_z
-        # vol_z = self.vol_z
-        dev_z = p.dev_z
-        vol_z = p.vol_z
-        d_res = self._compute_component_weights(dev_z, p.dev_u_mean, p.dev_u_var, p.dev_ls, p.dev_sig, self.dev_mean_func)
-        v_res = self._compute_component_weights(vol_z, p.vol_u_mean, p.vol_u_var, p.vol_ls, p.vol_sig, self.vol_mean_func)
-        # d_res = self._compute_component_weights(self.norm_dev, p.dev_u_mean, p.dev_u_var, p.dev_ls, p.dev_sig, self.dev_mean_func)
-        # v_res = self._compute_component_weights(self.norm_vol, p.vol_u_mean, p.vol_u_var, p.vol_ls, p.vol_sig, self.vol_mean_func)
-
-
+        d_res = self._compute_component_weights(p.dev_z, p.dev_u_mean, p.dev_u_var, p.dev_ls, p.dev_sig)
+        v_res = self._compute_component_weights(p.vol_z, p.vol_u_mean, p.vol_u_var, p.vol_ls, p.vol_sig)
 
         return GPWeights(
             dev_Kzz=d_res[0], dev_Kzz_inv=d_res[1], dev_v=d_res[2], dev_trace_term=d_res[3], 
@@ -109,26 +106,18 @@ class SparseHyperelasticityGP:
             vol_mahalanobis_term=v_res[4], vol_M_mat=v_res[5], vol_logterm=v_res[6]
         )
 
-    def dev_mean_func(self, d):
-        p = self.params
-        i1_bar_3, i2_bar_3 = d[0] - 3, d[1] - 3
-        # return (p.c01 * i1_bar_3 + p.c10 * i2_bar_3 + p.c11 * i1_bar_3 * i2_bar_3 + 
-        #         p.c02 * i1_bar_3**2 + p.c20 * i2_bar_3**2) * self.is_include_prior_mean
-        return (p.c01 * i1_bar_3)  * self.is_include_prior_mean
-    def vol_mean_func(self, v):
-        p = self.params
-        j_minus_1 = v[0] - 1
-        return (p.k * j_minus_1**2) * self.is_include_prior_mean
-        # return (p.k * j_minus_1**2 + p.q * jnp.log(v[0])**2) * self.is_include_prior_mean
-
-    # --- Pathwise Sampling Logic ---
-
+    # ---------------------------------------------------------
+    # 3. Pathwise Sampling (Physics-Informed)
+    # ---------------------------------------------------------
     def get_path_psi_fn(self, key):
-        """Returns a differentiable scalar function psi(F) for one realization."""
+        """
+        Returns a differentiable scalar function psi(F) for one realization.
+        This uses Matheron's rule to condition random prior features on the inducing points.
+        """
         k1, k2, k3, k4, k5, k6 = random.split(key, 6)
         p = self.params
         
-        # 1. Prior Sample Weights
+        # 1. Random Fourier Features for Prior Paths
         w_dev_prior = random.normal(k1, (self.L,))
         w_vol_prior = random.normal(k2, (self.L,))
 
@@ -143,200 +132,93 @@ class SparseHyperelasticityGP:
 
         def f_prior_vol(v):
             phi = jnp.sqrt(2.0 * p.vol_sig**2 / self.L) * jnp.cos(jnp.dot(v, W_vol / p.vol_ls[:, None]) + b_vol)
-
             return jnp.dot(phi, w_vol_prior)
 
-        # 2. Inducing Sample u ~ q(u)
+        # 2. Sample Inducing Values u ~ q(u)
         u_dev = jax.random.multivariate_normal(k3, p.dev_u_mean, jnp.diag(p.dev_u_var))
         u_vol = jax.random.multivariate_normal(k3, p.vol_u_mean, jnp.diag(p.vol_u_var))
 
-        # u_dev = p.dev_u_mean + jnp.sqrt(p.dev_u_var) * random.normal(k3, p.dev_u_mean.shape)
-        # u_vol = p.vol_u_mean + jnp.sqrt(p.vol_u_var) * random.normal(k3, p.vol_u_mean.shape)
-
         # 3. Correction Vectors (Matheron's Rule)
-        # We subtract the mean trend and the random prior path at inducing points
-        v_dev_corr = jnp.linalg.solve(self.gpweight.dev_Kzz, u_dev - vmap(self.dev_mean_func)(self.params.dev_z) - vmap(f_prior_dev)(self.params.dev_z))
-        v_vol_corr = jnp.linalg.solve(self.gpweight.vol_Kzz, u_vol - vmap(self.vol_mean_func)(self.params.vol_z) - vmap(f_prior_vol)(self.params.vol_z))
+        # We subtract the random prior path at inducing points (mean is zero)
+        v_dev_corr = jnp.linalg.solve(self.gpweight.dev_Kzz, u_dev - vmap(f_prior_dev)(self.params.dev_z))
+        v_vol_corr = jnp.linalg.solve(self.gpweight.vol_Kzz, u_vol - vmap(f_prior_vol)(self.params.vol_z))
 
         def path_psi(f):
-            # Transformation to Invariants
-            invariants, _ = invariants_and_derivatives(f)
-            dev, vol = transform_input_features(invariants)
+            dev, vol = self.feature_extractor.extract(f)
             
-            # Deviatoric Path
+            # Deviatoric Path (Prior + Update)
             k_dz = rbf(dev, self.params.dev_z, p.dev_sig, p.dev_ls)
-            psi_dev = self.dev_mean_func(dev) + f_prior_dev(dev) + jnp.dot(k_dz, v_dev_corr)
-
+            psi_dev = f_prior_dev(dev) + jnp.dot(k_dz, v_dev_corr)
             
-            # Volumetric Path
+            # Volumetric Path (Prior + Update)
             k_vz = rbf(vol, self.params.vol_z, p.vol_sig, p.vol_ls)
-            psi_vol = self.vol_mean_func(vol) + f_prior_vol(vol) + jnp.dot(k_vz, v_vol_corr)
+            psi_vol = f_prior_vol(vol) + jnp.dot(k_vz, v_vol_corr)
             
             return (psi_dev + psi_vol).squeeze()
 
         return path_psi
-    def psi_dist(self, f_mesh) :
-        posterior_mean = self.psi_gp_mean(f_mesh)
-        posterior_covar = self.psi_gp_cov(f_mesh)
-        return EnergyDist(posterior_mean, posterior_covar)
 
-    def psi_gp_mean(self, f) :
-        invariants, _ = jax.vmap(invariants_and_derivatives)(f)
-        dev, vol = jax.vmap(transform_input_features)(invariants)
-        gp_mean = self.dev_gp_mean(dev) + self.vol_gp_mean(vol)
-        return gp_mean.squeeze()
-    def psi_gp_cov(self, f) :
-        invariants, _ = jax.vmap(invariants_and_derivatives)(f)
-        dev, vol = jax.vmap(transform_input_features)(invariants)
-        k_dz = rbf(dev, self.params.dev_z, self.params.dev_sig, self.params.dev_ls)
-        k_dd = rbf(dev, dev, self.params.dev_sig, self.params.dev_ls)
+    def get_path_dev_vol_psi_fn(self, key):
+        k1, k2, k3, k4, k5, k6 = random.split(key, 6)
+        p = self.params
+        
+        w_dev_prior = random.normal(k1, (self.L,))
+        w_vol_prior = random.normal(k2, (self.L,))
 
-        cov_mat_dev = k_dd - k_dz @ self.gpweight.dev_M_mat @ k_dz.T
+        W_dev = random.normal(k3, (2, self.L)) 
+        b_dev = random.uniform(k4, (self.L,)) * 2 * jnp.pi
+        W_vol = random.normal(k5, (1, self.L)) 
+        b_vol = random.uniform(k6, (self.L,)) * 2 * jnp.pi
 
-        k_vz = rbf(vol, self.params.vol_z, self.params.vol_sig, self.params.vol_ls)
-        k_vv = rbf(vol, vol, self.params.vol_sig, self.params.vol_ls)
-        cov_mat_vol = k_vv - k_vz @ self.gpweight.vol_M_mat @ k_vz.T
-        # constraint every entry to positive
-        cov_mat_dev = jnp.maximum(cov_mat_dev, 1e-8)
-        cov_mat_vol = jnp.maximum(cov_mat_vol, 1e-8)
-        check = jnp.diag(cov_mat_dev + cov_mat_vol)
-        sqrt_check = jnp.sqrt(check)
+        def f_prior_dev(d):
+            phi = jnp.sqrt(2.0 * p.dev_sig**2 / self.L) * jnp.cos(jnp.dot(d, W_dev / p.dev_ls[:, None]) + b_dev)
+            return jnp.dot(phi, w_dev_prior)
 
-        return jnp.diag(cov_mat_dev + cov_mat_vol)
-    def dev_gp_mean(self, d) :
-        mean_prior = jax.vmap(self.dev_mean_func)(d)
-        dev_v = self.gpweight.dev_v
-        k_dz = rbf(d, self.params.dev_z, self.params.dev_sig, self.params.dev_ls)
-        gp_term = k_dz @ self.gpweight.dev_Kzz_inv @ dev_v
-        return mean_prior + gp_term
-    
-    def vol_gp_mean(self, v) :
-        mean_prior = jax.vmap(self.vol_mean_func)(v)
-        vol_v = self.gpweight.vol_v
-        k_vz = rbf(v, self.params.vol_z, self.params.vol_sig, self.params.vol_ls)
-        gp_term = k_vz @ self.gpweight.vol_Kzz_inv @ vol_v
-        return mean_prior + gp_term
-    def piola_gp_var(self, f):
-        """
-        Computes the variance of the Piola Stress components using 
-        double differentiation of the predictive covariance.
-        """
-        def psi_cov_single(f1, f2):
-            # We need a scalar-output covariance function to differentiate
-            # This mirrors your psi_gp_cov logic but for two distinct points
-            invariants1, _ = invariants_and_derivatives(f1)
-            dev1, vol1 = transform_input_features(invariants1)
-            invariants2, _ = invariants_and_derivatives(f2)
-            dev2, vol2 = transform_input_features(invariants2)
+        def f_prior_vol(v):
+            phi = jnp.sqrt(2.0 * p.vol_sig**2 / self.L) * jnp.cos(jnp.dot(v, W_vol / p.vol_ls[:, None]) + b_vol)
+            return jnp.dot(phi, w_vol_prior)
+
+        u_dev = jax.random.multivariate_normal(k3, p.dev_u_mean, jnp.diag(p.dev_u_var))
+        u_vol = jax.random.multivariate_normal(k3, p.vol_u_mean, jnp.diag(p.vol_u_var))
+
+        v_dev_corr = jnp.linalg.solve(self.gpweight.dev_Kzz, u_dev - vmap(f_prior_dev)(self.params.dev_z))
+        v_vol_corr = jnp.linalg.solve(self.gpweight.vol_Kzz, u_vol - vmap(f_prior_vol)(self.params.vol_z))
+
+        def path_dev_vol_psi(f):
+            dev, vol = self.feature_extractor.extract(f)
+            k_dz = rbf(dev, self.params.dev_z, p.dev_sig, p.dev_ls)
+            psi_dev = f_prior_dev(dev) + jnp.dot(k_dz, v_dev_corr)
+            k_vz = rbf(vol, self.params.vol_z, p.vol_sig, p.vol_ls)
+            psi_vol = f_prior_vol(vol) + jnp.dot(k_vz, v_vol_corr)
             
-            # Deviatoric part
-            k_d1z = rbf(dev1[None, :], self.params.dev_z, self.params.dev_sig, self.params.dev_ls)
-            k_dz2 = rbf(self.params.dev_z, dev2[None, :], self.params.dev_sig, self.params.dev_ls)
-            k_d1d2 = rbf(dev1[None, :], dev2[None, :], self.params.dev_sig, self.params.dev_ls)
-            cov_dev = k_d1d2 - k_d1z @ self.gpweight.dev_M_mat @ k_dz2
-            
-            # Volumetric part
-            k_v1z = rbf(vol1[None, :], self.params.vol_z, self.params.vol_sig, self.params.vol_ls)
-            k_vz2 = rbf(self.params.vol_z, vol2[None, :], self.params.vol_sig, self.params.vol_ls)
-            k_v1v2 = rbf(vol1[None, :], vol2[None, :], self.params.vol_sig, self.params.vol_ls)
-            cov_vol = k_v1v2 - k_v1z @ self.gpweight.vol_M_mat @ k_vz2
-            
-            return (cov_dev + cov_vol).squeeze()
+            return psi_dev.squeeze(), psi_vol.squeeze()
+        return path_dev_vol_psi
 
-        # The variance of the gradient is the Hessian of the covariance function
-        # at f1 = f2. We use jacfwd(jacrev) for the (2,2,2,2) tensor of covariances.
-        hessian_cov = jax.jacfwd(jax.jacrev(psi_cov_single, argnums=0), argnums=1)
-        return hessian_cov(f, f)
-    def psi_det(self, f) :
-        invariants, _ = invariants_and_derivatives(f)
-        dev, vol = transform_input_features(invariants)
-        return self.dev_mean_func(dev) + self.vol_mean_func(vol)
-    def piola_det(self, f) :
-        return jax.grad(self.psi_det)(f)
-    def piola_dist(self, f_mesh):
-        """
-        Calculates the Mean Piola Stress for a mesh of deformation gradients.
-        f_mesh shape: (N, 2, 2)
-        """
-        # Define the scalar energy function for one F
-        def single_psi_mean(f):
-            # We use your existing psi_gp_mean logic but for a single 2x2
-            invariants, _ = invariants_and_derivatives(f)
-            dev, vol = transform_input_features(invariants)
-            # Note: ensuring these return scalars
-            return (self.dev_gp_mean(dev[None, :]) + self.vol_gp_mean(vol[None, :])).reshape()
-
-        # Vectorized Gradient (Mean Piola)
-        piola_mean_fn = jax.vmap(jax.grad(single_psi_mean))
-        piola_means = piola_mean_fn(f_mesh)
-
-        # Vectorized Hessian (Piola Variance/Covariance)
-        # This uses the double-differentiation logic discussed earlier
-        def single_piola_var(f):
-            # Compute the 2x2x2x2 Hessian of the covariance at f
-            return jnp.einsum('ijij->ij', self.piola_gp_var(f)) # Re-use the function from previous turn
-
-        piola_vars_fn = jax.vmap(single_piola_var)
-        piola_vars = piola_vars_fn(f_mesh)
-        # piola_vars = self.piola_gp_var(f_mesh)
-        return StressDist(piola_means, piola_vars)
-    
-    def psi_mds(self, f, key) :
-        dist = self.psi_dist(f)
-        psi = jax.random.multivariate_normal(key, dist.mean, dist.var)
-        return psi
-    # def piola_mds(self, f, key) :
-    #     dist = self.piola_dist(f)
-    #     return jax.random.multivariate_normal(key, dist.mean, dist.var)
-    def piola_mds(self, f_mesh, key):
-        """
-        Samples the ENTIRE correlated Piola stress field across a mesh.
-        f_mesh: (N, 2, 2)
-        """
-        N = f_mesh.shape[0]
-        
-        # 1. Compute the Mean Stress Field (N, 2, 2) -> (4N,)
-        dist_mean = self.piola_dist(f_mesh).mean.reshape(-1)
-        
-        # 2. Compute the Full Joint Covariance (4N, 4N)
-        # This requires a double-loop or a vectorized Hessian over ALL pairs (fi, fj)
-
-
-        # Vectorizing this over the mesh is the bottleneck
-        # produces (N, N, 2, 2, 2, 2)
-        K_full_tensor = jax.vmap(jax.vmap(self.piola_gp_var, in_axes=(None, 0)), in_axes=(0, None))(f_mesh, f_mesh)
-        
-        # Reshape to (4N, 4N)
-        K_joint = K_full_tensor.transpose(0, 2, 1, 3, 4, 5).reshape(4*N, 4*N)
-        K_joint += 1e-6 * jnp.eye(4*N) # Numerical stability jitter
-        
-        # 3. Sample
-        sample_flat = jax.random.multivariate_normal(key, dist_mean, K_joint)
-    
-        return sample_flat.reshape(N, 2, 2)
-    def psi_pws(self, f, key) :
-        path_psi = self.get_path_psi_fn(key)
-        return path_psi(f)
-    def piola_pws(self, f, key) :
-        path_psi = self.get_path_psi_fn(key)
-        # Gradient of energy = Piola Stress
-        piola_fn = grad(path_psi)
-        # Vectorize over all elements in the mesh
-        return piola_fn(f)
-
-    def psi(self, f_mesh, key) :
+    # ---------------------------------------------------------
+    # 4. API Endpoints for Loss / Evaluation
+    # ---------------------------------------------------------
+    def psi(self, f_mesh, key):
         """Calculates Energy across a mesh for a single realization."""
-        if self.sampling_mode == "mds" :
+        if self.sampling_mode == "mds":
             return self.psi_mds(f_mesh, key)
-        elif self.sampling_mode == "pws" :
+        elif self.sampling_mode == "pws":
             return self.psi_pws(f_mesh, key)
+
     def piola(self, f_mesh, key):
         """Calculates Piola Stress field across a mesh for a single realization."""
-        if self.sampling_mode == "mds" :
-            return self.psi_mds(f_mesh, key)
-        elif self.sampling_mode == "pws" :
+        if self.sampling_mode == "mds":
+            return self.piola_mds(f_mesh, key)
+        elif self.sampling_mode == "pws":
             return self.piola_pws(f_mesh, key)
 
+    def psi_pws(self, f, key):
+        path_psi = self.get_path_psi_fn(key)
+        return path_psi(f)
+
+    def piola_pws(self, f, key):
+        path_psi = self.get_path_psi_fn(key)
+        piola_fn = grad(path_psi)
+        return piola_fn(f)
 
     def kl_divergence(self):
         """Computes the KL divergence for ELBO training."""
@@ -348,3 +230,148 @@ class SparseHyperelasticityGP:
         vol_kl = component_kl(self.gpweight.vol_mahalanobis_term, self.gpweight.vol_logterm, 
                               self.gpweight.vol_trace_term, self.params.vol_z.shape[0])
         return (dev_kl + vol_kl) * self.beta
+
+    # ---------------------------------------------------------
+    # 5. Analytical GP Moments (Mean & Covariance for MDS)
+    # ---------------------------------------------------------
+    def dev_gp_mean(self, d):
+        k_dz = rbf(d, self.params.dev_z, self.params.dev_sig, self.params.dev_ls)
+        gp_term = k_dz @ self.gpweight.dev_Kzz_inv @ self.gpweight.dev_v
+        return gp_term # Zero mean prior
+    
+    def vol_gp_mean(self, v):
+        k_vz = rbf(v, self.params.vol_z, self.params.vol_sig, self.params.vol_ls)
+        gp_term = k_vz @ self.gpweight.vol_Kzz_inv @ self.gpweight.vol_v
+        return gp_term
+
+    def psi_gp_mean(self, f):
+        dev, vol = jax.vmap(self.feature_extractor.extract)(f)
+        gp_mean = self.dev_gp_mean(dev) + self.vol_gp_mean(vol)
+        return gp_mean.squeeze()
+
+    def psi_gp_cov(self, f):
+        dev, vol = jax.vmap(self.feature_extractor.extract)(f)
+        k_dz = rbf(dev, self.params.dev_z, self.params.dev_sig, self.params.dev_ls)
+        k_dd = rbf(dev, dev, self.params.dev_sig, self.params.dev_ls)
+
+        cov_mat_dev = k_dd - k_dz @ self.gpweight.dev_M_mat @ k_dz.T
+
+        k_vz = rbf(vol, self.params.vol_z, self.params.vol_sig, self.params.vol_ls)
+        k_vv = rbf(vol, vol, self.params.vol_sig, self.params.vol_ls)
+        cov_mat_vol = k_vv - k_vz @ self.gpweight.vol_M_mat @ k_vz.T
+        
+        # Constraint every entry to positive
+        cov_mat_dev = jnp.maximum(cov_mat_dev, 1e-8)
+        cov_mat_vol = jnp.maximum(cov_mat_vol, 1e-8)
+        return jnp.diag(cov_mat_dev + cov_mat_vol)
+
+    def psi_joint_cov(self, f):
+        """Returns the full N x N dense covariance matrix for psi."""
+        dev, vol = jax.vmap(self.feature_extractor.extract)(f)
+        k_dz = rbf(dev, self.params.dev_z, self.params.dev_sig, self.params.dev_ls)
+        k_dd = rbf(dev, dev, self.params.dev_sig, self.params.dev_ls)
+
+        cov_mat_dev = k_dd - k_dz @ self.gpweight.dev_M_mat @ k_dz.T
+
+        k_vz = rbf(vol, self.params.vol_z, self.params.vol_sig, self.params.vol_ls)
+        k_vv = rbf(vol, vol, self.params.vol_sig, self.params.vol_ls)
+        cov_mat_vol = k_vv - k_vz @ self.gpweight.vol_M_mat @ k_vz.T
+        
+        cov_full = cov_mat_dev + cov_mat_vol
+        jitter = 1e-4 * jnp.eye(f.shape[0])
+        return cov_full + jitter
+
+    def piola_gp_var(self, f):
+        """
+        Computes the variance of the Piola Stress components using 
+        double differentiation of the predictive covariance.
+        """
+        def psi_cov_single(f1, f2):
+            dev1, vol1 = self.feature_extractor.extract(f1)
+            dev2, vol2 = self.feature_extractor.extract(f2)
+            
+            k_d1z = rbf(dev1[None, :], self.params.dev_z, self.params.dev_sig, self.params.dev_ls)
+            k_dz2 = rbf(self.params.dev_z, dev2[None, :], self.params.dev_sig, self.params.dev_ls)
+            k_d1d2 = rbf(dev1[None, :], dev2[None, :], self.params.dev_sig, self.params.dev_ls)
+            cov_dev = k_d1d2 - k_d1z @ self.gpweight.dev_M_mat @ k_dz2
+            
+            k_v1z = rbf(vol1[None, :], self.params.vol_z, self.params.vol_sig, self.params.vol_ls)
+            k_vz2 = rbf(self.params.vol_z, vol2[None, :], self.params.vol_sig, self.params.vol_ls)
+            k_v1v2 = rbf(vol1[None, :], vol2[None, :], self.params.vol_sig, self.params.vol_ls)
+            cov_vol = k_v1v2 - k_v1z @ self.gpweight.vol_M_mat @ k_vz2
+            
+            return (cov_dev + cov_vol).squeeze()
+
+        hessian_cov = jax.jacfwd(jax.jacrev(psi_cov_single, argnums=0), argnums=1)
+        return hessian_cov(f, f)
+
+    def psi_det(self, f):
+        dev, vol = self.feature_extractor.extract(f)
+        return self.dev_gp_mean(dev[None, :]).reshape() + self.vol_gp_mean(vol[None, :]).reshape()
+
+    def piola_det(self, f):
+        return jax.grad(self.psi_det)(f)
+
+    def psi_dist(self, f_mesh):
+        f_mesh = jnp.asarray(f_mesh, dtype=jnp.float64)
+        posterior_mean = self.psi_gp_mean(f_mesh)
+        posterior_covar = self.psi_gp_cov(f_mesh)
+        return EnergyDist(posterior_mean, posterior_covar)
+
+    def dev_psi_dist(self, f_mesh):
+        dev, _ = jax.vmap(self.feature_extractor.extract)(f_mesh)
+        mean = self.dev_gp_mean(dev)
+        k_dz = rbf(dev, self.params.dev_z, self.params.dev_sig, self.params.dev_ls)
+        k_dd = rbf(dev, dev, self.params.dev_sig, self.params.dev_ls)
+        cov = k_dd - k_dz @ self.gpweight.dev_M_mat @ k_dz.T
+        var = jnp.diag(jnp.maximum(cov, 1e-8))
+        return EnergyDist(mean.squeeze(), var)
+        
+    def vol_psi_dist(self, f_mesh):
+        _, vol = jax.vmap(self.feature_extractor.extract)(f_mesh)
+        mean = self.vol_gp_mean(vol)
+        k_vz = rbf(vol, self.params.vol_z, self.params.vol_sig, self.params.vol_ls)
+        k_vv = rbf(vol, vol, self.params.vol_sig, self.params.vol_ls)
+        cov = k_vv - k_vz @ self.gpweight.vol_M_mat @ k_vz.T
+        var = jnp.diag(jnp.maximum(cov, 1e-8))
+        return EnergyDist(mean.squeeze(), var)
+
+    def piola_dist(self, f_mesh):
+        """
+        Calculates the Mean Piola Stress for a mesh of deformation gradients.
+        f_mesh shape: (N, 2, 2)
+        """
+        f_mesh = jnp.asarray(f_mesh, dtype=jnp.float64)
+        def single_psi_mean(f):
+            dev, vol = self.feature_extractor.extract(f)
+            return (self.dev_gp_mean(dev[None, :]) + self.vol_gp_mean(vol[None, :])).reshape()
+
+        piola_mean_fn = jax.vmap(jax.grad(single_psi_mean))
+        piola_means = piola_mean_fn(f_mesh)
+
+        def single_piola_var(f):
+            return jnp.einsum('ijij->ij', self.piola_gp_var(f))
+
+        piola_vars_fn = jax.vmap(single_piola_var)
+        piola_vars = piola_vars_fn(f_mesh)
+        return StressDist(piola_means, piola_vars)
+    
+    def psi_mds(self, f, key):
+        dist = self.psi_dist(f)
+        psi = jax.random.multivariate_normal(key, dist.mean, dist.var)
+        return psi
+
+    def piola_mds(self, f_mesh, key):
+        """
+        Samples the ENTIRE correlated Piola stress field across a mesh.
+        f_mesh: (N, 2, 2)
+        """
+        N = f_mesh.shape[0]
+        dist_mean = self.piola_dist(f_mesh).mean.reshape(-1)
+        
+        K_full_tensor = jax.vmap(jax.vmap(self.piola_gp_var, in_axes=(None, 0)), in_axes=(0, None))(f_mesh, f_mesh)
+        K_joint = K_full_tensor.transpose(0, 2, 1, 3, 4, 5).reshape(4*N, 4*N)
+        K_joint += 1e-6 * jnp.eye(4*N) # Numerical stability jitter
+        
+        sample_flat = jax.random.multivariate_normal(key, dist_mean, K_joint)
+        return sample_flat.reshape(N, 2, 2)

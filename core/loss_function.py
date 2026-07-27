@@ -21,20 +21,20 @@ def total_stochastic_loss(p, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, 
     piola_sampling = jax.vmap(piola_steps, in_axes=(None, 0))
     piola2x2_cells = piola_sampling(f3x3, subkey)
 
-    # vmapped_ell
+    # vmapped_ell maps over Monte Carlo samples (axis 7 of piola2x2_cells)
     vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, 0, None, None))
-    steps_ell = jax.vmap(vmapped_ell, in_axes=(None, 0, 0, None, None, None, None, None, None, None))
-    ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = steps_ell(model.params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
+    ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(model.params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
+    
     kl_div = model.kl_divergence()
+    
     total_loss = -jnp.mean(ell_) + kl_div
     return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood), jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss))
 
 def ell(p, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA) :
     sigma_free_x = p.sigma_free_x
     sigma_free_y = p.sigma_free_y
-    # sigma_fix_x = p.sigma_fix_x
-    # sigma_fix_y = p.sigma_fix_y
 
+    # vmap over load steps for the VFM loss
     free_loss, fix_loss = jax.vmap(vfm_loss, in_axes=(None, None, 0, None, 0, None, None))(cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
 
     fix_x_loss = fix_loss[:, 0]
@@ -42,13 +42,16 @@ def ell(p, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, pio
     free_x_loss = free_loss[:, :, 0]
     free_y_loss = free_loss[:, :, 1]
 
-    n_freedofs = free_loss.shape[0] * free_loss.shape[1]
-    n_fixedofs = fix_loss.shape[0] * fix_loss.shape[1]
+    n_steps = free_loss.shape[0]
+    n_freedofs_per_step = free_loss.shape[1]
+    n_freedofs_total = n_steps * n_freedofs_per_step
 
-    free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - n_freedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
-    free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - n_freedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
-    fix_x_log_likelihood = - (1.0 / (2 * (sigma_fix_x**2))) * jnp.sum(fix_x_loss**2) - n_fixedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_fix_x**2))
-    fix_y_log_likelihood = - (1.0 / (2 * (sigma_fix_y**2))) * jnp.sum(fix_y_loss**2) - n_fixedofs/2.0 * jnp.log(2 * jnp.pi * (sigma_fix_y**2))
+    free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - n_freedofs_total/2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
+    free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - n_freedofs_total/2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
+    
+    # sigma_fix_x and sigma_fix_y have shape (N_steps,)
+    fix_x_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
+    fix_y_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
 
     expected_log_likelihood = free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
     return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, jnp.sum(free_loss**2) , jnp.sum(fix_loss**2))
@@ -231,21 +234,3 @@ def physical_loss_displacement_controlled(u, loads, piola_func, coords, cells, n
     reaction_loss = fnl_left + fnl_bottom + fnl_right + fnl_top
 
     return free_r_total, reaction_loss
-
-def total_supervised_loss(p: GPRawParams, model: SparseHyperelasticityGP, true_psi: BaseMaterialModel, f_array: jnp.ndarray, key) :
-    model.params = model.load_params(p)
-    model.gpweight = model.precompute_weights(p)
-    psi_func = jax.vmap(lambda f:model.psi(f, key))
-    sigma_physic = model.params.sigma_phys_x
-    f_array = jax.vmap(fto3x3)(f_array)
-    pred_psi = psi_func(f_array)
-    ell_, (sum_free_loss, sum_fix_loss) = supervised_ell(pred_psi, true_psi, sigma_physic)
-    kl_div = model.kl_divergance()
-    total_loss = -ell_ + kl_div
-    return total_loss, (ell_, kl_div, sum_free_loss, sum_fix_loss)
-
-
-def supervised_ell(pred_psi, true_psi, sigma_data) :
-    n_data = pred_psi.shape[0]
-    ell_ = -(1.0 / (2 * (sigma_data)**2)) * jnp.sum((pred_psi - true_psi)**2) - n_data/2.0 * jnp.log(2 * jnp.pi * (sigma_data**2))
-    return ell_, (jnp.sum((pred_psi - true_psi)**2), sigma_data)

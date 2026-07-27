@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: mmdiscovery
+    container_name: ugp_disc_hyperelastic
     volumes:
       - .:/home/mmdiscovery/shared
     working_dir: /home/mmdiscovery/shared
