@@ -1,0 +1,3 @@
+[submodule "UQInModelDiscovery"]
+	path = UQInModelDiscovery
+	url = https://github.com/narupanta/UQInModelDiscovery.git

@@ -1,5 +1,6 @@
 # Start from the official Dolfinx image
-FROM dolfinx/dolfinx:stable
+FROM --platform=linux/amd64 dolfinx/dolfinx:stable
+
 
 # ---------------------------
 # Upgrade pip and Python packages
