@@ -1,4 +1,4 @@
-/dataset/*
+# /dataset/*
 /ref_literature/*
 /.vscode
 /.devcontainer
@@ -21,7 +21,8 @@ raw_dataset/
 *.pt
 /extracted_model/
 /distilled_model/
-/dataset/
+/dataset/synthetic
+/dataset/precomputed_vfm
 /extraction/extracted_models/
 /distillation/distilled_models/
 /distillation/distillation_models/
