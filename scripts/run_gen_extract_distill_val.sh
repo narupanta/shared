@@ -9,19 +9,28 @@
 set -e
 
 # Configuration File & Argument Parsing
-YAML_FILE="distill_pipeline_config.yaml"
+YAML_INPUT="distill_pipeline_config.yaml"
 SKIP_VAL=false
 
 for arg in "$@"; do
     if [ "$arg" == "--skip-val" ] || [ "$arg" == "--no-val" ] || [ "$arg" == "--skip-validation" ]; then
         SKIP_VAL=true
     elif [[ "$arg" != --* ]]; then
-        YAML_FILE="$arg"
+        YAML_INPUT="$arg"
     fi
 done
 
-if [ ! -f "$YAML_FILE" ]; then
-    echo "❌ Error: Configuration file '$YAML_FILE' not found!"
+# Recipe shortcut resolution (e.g. 'isihara', 'gentthomas', 'nh2', 'nh4')
+if [ -f "$YAML_INPUT" ]; then
+    YAML_FILE="$YAML_INPUT"
+elif [ -f "configs/recipes/${YAML_INPUT}.yaml" ]; then
+    YAML_FILE="configs/recipes/${YAML_INPUT}.yaml"
+elif [ -f "configs/recipes/${YAML_INPUT}_benchmark.yaml" ]; then
+    YAML_FILE="configs/recipes/${YAML_INPUT}_benchmark.yaml"
+else
+    echo "❌ Error: Configuration file or recipe '$YAML_INPUT' not found!"
+    echo "Available recipes in configs/recipes/:"
+    ls -1 configs/recipes/*.yaml 2>/dev/null || echo "  (none)"
     exit 1
 fi
 

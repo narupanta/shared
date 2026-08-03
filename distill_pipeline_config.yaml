@@ -3,10 +3,10 @@
 # ==============================================================================
 
 # 1. Synthetic Dataset Generation Config
-material_model_name: isihara
+material_model_name: nh4
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 8.0
+target_load_true_top: 1.8
 asym_factor: 0.95
 n_loadsteps: 10
 

@@ -227,77 +227,14 @@ class Isihara(BaseMaterialModel):
         I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
         return self.d1 * (jnp.sqrt(I3_safe) - 1)**2
 
-@register_material("gentthomas")
-class GentThomas(BaseMaterialModel):
-    def __init__(self, c1=1.0, c2=1.5, jit_P: bool = True):
-        super().__init__(jit_P=jit_P)
-        self.c1 = c1
-        self.c2 = c2
-
-    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
-        return self.psi_dev(F) + self.psi_vol(F)
-
-    def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
-        C = C_func(F)
-        I1 = I1_func(C)
-        I2 = I2_func(C)
-        I3 = I3_func(C) 
-        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
-        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
-        term2 = jnp.log(I3_safe**(-2/3) * I2/3)
-        return term1 + term2
-
-    def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
-        C = C_func(F)
-        I3 = I3_func(C) 
-        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
-        return self.c2 * (jnp.sqrt(I3_safe) - 1)**2
-
-@register_material("neohookean4")
-class NeoHookean4(BaseMaterialModel):
-    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
-        super().__init__(jit_P=jit_P)
-        self.c1 = c1
-        self.c2 = c2
-
-    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
-        C = C_func(F)
-        I1 = I1_func(C)
-        I2 = I2_func(C)
-        I3 = I3_func(C) 
-        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
-        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
-        term3 = self.c2 * (jnp.sqrt(I3_safe) - 1)**4
-        return term1 + term3
-    
-@register_material("haineswilson")
-class HainesWilson(BaseMaterialModel):
-    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
-        super().__init__(jit_P=jit_P)
-        self.c1 = c1
-        self.c2 = c2
-
-    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
-        C = C_func(F)
-        I1 = I1_func(C)
-        I2 = I2_func(C)
-        I3 = I3_func(C) 
-        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
-        term1 = self.c1 * (I3_safe**(-1/3) * I1 - 3)
-        term2 = 1.0 * (I3_safe**(-2/3) * I2 - 3)
-        term3 = 0.7 * (I3_safe**(-1/3) * I1 - 3) * (I3_safe**(-2/3) * I2 - 3)
-        term4 = 0.2 * (I3_safe**(-1/3) * I1 - 3)**3
-        term5 = self.c2 * (jnp.sqrt(I3_safe) - 1)**2
-        return term1 + term2 + term3 + term4 + term5
-
 @register_material("gmr")
 class GeneralizedMooneyRivlin(BaseMaterialModel):
     def __init__(self, dev_params=None, vol_params=None, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
-        # dev_params: [C10, C01, C20, C11, C02, C30, C21, C12, C03]
+        # dev_params: [C10, C01, C20, C11, C02, C30, C21, C12, C03, CL1, CL2]
         # vol_params: [D1, D2, D3]
         if dev_params is None:
-            dev_params = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            dev_params = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         if vol_params is None:
             vol_params = [1.5, 0.0, 0.0]
         self.dev_params = dev_params
@@ -319,7 +256,11 @@ class GeneralizedMooneyRivlin(BaseMaterialModel):
         X = i1_dev - 3.0
         Y = i2_dev - 3.0
         
-        # Deviatoric Terms (Order 3)
+        # Logarithmic Terms
+        log1 = jnp.log(jnp.clip(i1_dev / 3.0, 1.0e-8, 1.0e8))
+        log2 = jnp.log(jnp.clip(i2_dev / 3.0, 1.0e-8, 1.0e8))
+
+        # Deviatoric Terms (Order 3 + Logarithmic Terms)
         dev_terms = (
             self.dev_params[0] * X + 
             self.dev_params[1] * Y + 
@@ -329,7 +270,9 @@ class GeneralizedMooneyRivlin(BaseMaterialModel):
             self.dev_params[5] * X**3 + 
             self.dev_params[6] * (X**2) * Y + 
             self.dev_params[7] * X * (Y**2) +
-            self.dev_params[8] * Y**3
+            self.dev_params[8] * Y**3 +
+            (self.dev_params[9] * log1 if len(self.dev_params) > 9 else 0.0) +
+            (self.dev_params[10] * log2 if len(self.dev_params) > 10 else 0.0)
         )
         
         J = jnp.sqrt(I3_safe)
@@ -357,10 +300,35 @@ class GeneralizedMooneyRivlin(BaseMaterialModel):
         return dev_terms + vol_terms
 
 
+@register_material("gentthomas")
+class GentThomas(GeneralizedMooneyRivlin):
+    def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
+        # Gent-Thomas derived as a special case of GMR:
+        # C10 = c1 (default 0.5), CL2 = 1.0, D1 = c2 (default 1.5)
+        dev_params = [c1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        vol_params = [c2, 0.0, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
+
+
+@register_material("nh4")
+@register_material("neohookean4")
+class NeoHookean4(GeneralizedMooneyRivlin):
+    def __init__(self, c10=0.5, d2=1.5, jit_P: bool = True):
+        # NeoHookean4 (psi = c10*(I1-3) + d2*(J-1)^4) derived as a special case of GMR:
+        # C10 = c10 (default 0.5), D2 = d2 (default 1.5)
+        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        vol_params = [0.0, d2, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
+
+
+@register_material("nh2")
+@register_material("neohookean2")
 @register_material("nh")
 class NeoHookeanGMR(GeneralizedMooneyRivlin):
     def __init__(self, c10=0.5, d1=1.5, jit_P: bool = True):
-        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        # NeoHookean2 (psi = c10*(I1-3) + d1*(J-1)^2) derived as a special case of GMR:
+        # C10 = c10 (default 0.5), D1 = d1 (default 1.5)
+        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         vol_params = [d1, 0.0, 0.0]
         super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
 
