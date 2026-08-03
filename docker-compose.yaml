@@ -11,9 +11,9 @@ services:
       - PYTHONUNBUFFERED=1
     command: tail -f /dev/null
 
-    # This section must be indented under the service!
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
+    # Disabled GPU reservation for macOS / CPU execution in Docker:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]

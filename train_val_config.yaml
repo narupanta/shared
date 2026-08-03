@@ -1,14 +1,14 @@
 # Dataset config
-material_model_name: nh
+material_model_name: isihara
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 1.5
+target_load_true_top: 8.0
 asym_factor: 0.95
 n_loadsteps: 10
 
 # Training config
 number_of_mci_sampling: 8
-train_load_steps_indices: [1, 11, 20]
+train_load_steps_indices: [1, 5, 9]
 n_ip: 5
 beta: 80
 is_fixed_reaction_force_noise: 1

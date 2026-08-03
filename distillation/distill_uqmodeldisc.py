@@ -403,6 +403,13 @@ def main():
         time_records['Stage 1 (Initial Distillation)'] = t_stage1_dur
         print(f"\n[Time Usage] Stage 1 finished in {t_stage1_dur / 60:.2f} minutes ({t_stage1_dur:.2f} seconds).\n")
         
+        save_normalizing_flow_parameter_distribution(
+            distribution=distribution,
+            output_subdirectory=".",
+            project_directory=project_dir,
+            device=device
+        )
+
         plot_loss_monitoring(
             os.path.join(out_dir, "loss_history_before_sensitivity.npz"),
             title_suffix="(Stage 1: Before Sensitivity Analysis)",
