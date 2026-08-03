@@ -115,6 +115,7 @@ def main():
     parser.add_argument("--max_gamma", type=float, default=0.8)
     parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all"], help="Sample deformations from standard modes (with or without interpolation clipping), extraction dataset with FPS, or all extraction dataset points.")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points to evaluate GP over.")
+    parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy"], help="Distillation target mode: solely Strain Energy Function (sef), joint SEF + Piola stress (sef_stress), or joint SEF + Cauchy stress (sef_cauchy).")
     parser.add_argument("--export_subfolder", type=str, default="", help="Custom output subfolder for exported PyTorch matrices.")
     args = parser.parse_args()
 
@@ -203,6 +204,8 @@ def main():
     
     if args.export_subfolder:
         export_subfolder = args.export_subfolder
+    elif args.distill_target in ["sef_stress", "sef_cauchy"]:
+        export_subfolder = f"{export_subfolder}_{args.distill_target}"
     
     # Pad to 3x3 Plane Strain!
     f3x3_flat = np.zeros((f3x3_flat_2x2.shape[0], 3, 3))
@@ -212,13 +215,36 @@ def main():
         
     f3x3_flat = jnp.array(f3x3_flat)
     
-    mean_psi = gp_model.psi_gp_mean(f3x3_flat)
-    cov_psi = gp_model.psi_joint_cov(f3x3_flat)
-    
-    mean_psi = np.array(mean_psi)
-    cov_psi = np.array(cov_psi)
-    batch_size = mean_psi.shape[0]
-    cov_psi = cov_psi + 1e-6 * np.eye(batch_size)
+    if args.distill_target == "sef":
+        mean_psi = gp_model.psi_gp_mean(f3x3_flat)
+        cov_psi = gp_model.psi_joint_cov(f3x3_flat)
+        mean_psi = np.array(mean_psi)
+        cov_psi = np.array(cov_psi)
+        batch_size = mean_psi.shape[0]
+        cov_psi = cov_psi + 1e-6 * np.eye(batch_size)
+    elif args.distill_target in ["sef_stress", "sef_cauchy"]:
+        print(f"Drawing 2048 GP Pathwise realizations for joint SEF + {args.distill_target.upper()} covariance estimation over {f3x3_flat.shape[0]} points...")
+        keys = jax.random.split(jax.random.PRNGKey(42), 2048)
+        
+        def sample_joint(key):
+            path_psi = gp_model.get_path_psi_fn(key)
+            psi_val = jax.vmap(path_psi)(f3x3_flat)
+            piola_val = jax.vmap(jax.grad(path_psi))(f3x3_flat)
+            if args.distill_target == "sef_cauchy":
+                J_val = jnp.linalg.det(f3x3_flat).reshape(-1, 1, 1)
+                stress_val = (piola_val @ f3x3_flat.transpose(0, 2, 1)) / J_val
+            else:
+                stress_val = piola_val
+            p00 = stress_val[:, 0, 0]
+            p11 = stress_val[:, 1, 1]
+            p01 = stress_val[:, 0, 1]
+            return jnp.stack([psi_val, p00, p11, p01], axis=0).reshape(-1)
+            
+        sample_matrix = np.array(jax.jit(jax.vmap(sample_joint))(keys), dtype=np.float64)
+        mean_psi = np.mean(sample_matrix, axis=0)
+        cov_psi = np.cov(sample_matrix, rowvar=False)
+        batch_size = mean_psi.shape[0]
+        cov_psi = cov_psi + 1e-6 * np.eye(batch_size)
 
     # Save to disk
     out_dir = os.path.join(args.saved_model_dir, export_subfolder)
@@ -228,7 +254,7 @@ def main():
     np.save(os.path.join(out_dir, "cov_psi.npy"), np.array(cov_psi))
     np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
     
-    print(f"Exported GP Mean ({mean_psi.shape}) and Cov ({cov_psi.shape}) to {out_dir}")
+    print(f"Exported GP Target Mean ({mean_psi.shape}) and Cov ({cov_psi.shape}) to {out_dir}")
 
 if __name__ == "__main__":
     main()

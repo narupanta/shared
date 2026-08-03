@@ -58,7 +58,7 @@ def parse_args():
     return parser.parse_args()
 
 def sigma_fix_to_log_sigma_fix(sigma_fix) :
-    return jnp.log(sigma_fix)
+    return jnp.log(jnp.maximum(sigma_fix, 1e-3))
 
 
 

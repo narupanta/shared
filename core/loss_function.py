@@ -31,8 +31,10 @@ def total_stochastic_loss(p, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, 
     return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood), jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss))
 
 def ell(p, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA) :
-    sigma_free_x = p.sigma_free_x
-    sigma_free_y = p.sigma_free_y
+    sigma_free_x = jnp.maximum(p.sigma_free_x, 1e-3)
+    sigma_free_y = jnp.maximum(p.sigma_free_y, 1e-3)
+    sigma_fix_x = jnp.maximum(sigma_fix_x, 1e-3)
+    sigma_fix_y = jnp.maximum(sigma_fix_y, 1e-3)
 
     # vmap over load steps for the VFM loss
     free_loss, fix_loss = jax.vmap(vfm_loss, in_axes=(None, None, 0, None, 0, None, None))(cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA)
