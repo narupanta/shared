@@ -114,17 +114,22 @@ class EnergyOutputSelector:
         return outputs
 
 class PyTorchGMRModel(nn.Module):
-    def __init__(self, num_points, device, distill_target="sef"):
+    def __init__(self, num_points, device, distill_target="sef", include_log_terms=True):
         super().__init__()
         self.distill_target = distill_target
+        self.include_log_terms = include_log_terms
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
-        self._num_parameters = 14
-        self._parameter_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL1", "CL2", "D1", "D2", "D3")
-        self._parameter_scales = torch.ones(14, device=device)
+        if self.include_log_terms:
+            self._num_parameters = 14
+            self._parameter_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL1", "CL2", "D1", "D2", "D3")
+        else:
+            self._num_parameters = 12
+            self._parameter_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "D1", "D2", "D3")
+        self._parameter_scales = torch.ones(self._num_parameters, device=device)
         self._device = device
         self._num_points = num_points
-        self._parameter_mask = init_parameter_mask(14, device)
-        self._parameter_population_matrix = init_parameter_population_matrix(14, device)
+        self._parameter_mask = init_parameter_mask(self._num_parameters, device)
+        self._parameter_population_matrix = init_parameter_population_matrix(self._num_parameters, device)
 
     @property
     def output_dim(self) -> int: return self._output_dim
@@ -163,15 +168,19 @@ class PyTorchGMRModel(nn.Module):
         I2_m3 = I2_bar - 3.0
         J_m1 = J - 1.0
 
-        C10, C01, C20, C11, C02, C30, C21, C12, C03, CL1, CL2, D1, D2, D3 = full_parameters
-
-        log1 = torch.log(torch.clamp(I1_bar / 3.0, min=1e-8))
-        log2 = torch.log(torch.clamp(I2_bar / 3.0, min=1e-8))
+        if self.include_log_terms:
+            C10, C01, C20, C11, C02, C30, C21, C12, C03, CL1, CL2, D1, D2, D3 = full_parameters
+            log1 = torch.log(torch.clamp(I1_bar / 3.0, min=1e-8))
+            log2 = torch.log(torch.clamp(I2_bar / 3.0, min=1e-8))
+            W_log = CL1 * log1 + CL2 * log2
+        else:
+            C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3 = full_parameters
+            W_log = 0.0
 
         W_dev = (C10 * I1_m3 + C01 * I2_m3 +
                  C20 * I1_m3**2 + C11 * I1_m3 * I2_m3 + C02 * I2_m3**2 +
                  C30 * I1_m3**3 + C21 * (I1_m3**2) * I2_m3 + C12 * I1_m3 * (I2_m3**2) + C03 * I2_m3**3 +
-                 CL1 * log1 + CL2 * log2)
+                 W_log)
         
         W_vol = D1 * J_m1**2 + D2 * J_m1**4 + D3 * J_m1**6
 
@@ -183,8 +192,11 @@ class PyTorchGMRModel(nn.Module):
             dI2_dF = 2.0 * I1.view(-1, 1, 1) * inputs - 2.0 * torch.matmul(inputs, torch.matmul(inputs.transpose(1, 2), inputs))
             dI2bar_dF = J.view(-1, 1, 1)**(-4/3) * (dI2_dF - (4.0/3.0) * I2.view(-1, 1, 1) * F_inv_T)
             
-            dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2) + CL1 / I1_bar
-            dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2) + CL2 / I2_bar
+            dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
+            dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
+            if self.include_log_terms:
+                dW_dI1 = dW_dI1 + CL1 / I1_bar
+                dW_dI2 = dW_dI2 + CL2 / I2_bar
             dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * (J_m1**3) + 6.0 * D3 * (J_m1**5)
             
             stress = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF + dW_dJ.view(-1, 1, 1) * dJ_dF
@@ -245,7 +257,7 @@ class PyTorchGMRModel(nn.Module):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, default="gmr")
+    parser.add_argument("--material_model", type=str, default="gmr", help="Material model to distill (gmr/gmr_log with log terms, gmr_nolog without log terms)")
     parser.add_argument("--n_iterations", type=int, default=5000)
     parser.add_argument("--load_distilled_dir", type=str, default=None, help="Path to existing distilled model directory to load flow parameters without re-running Stage 1")
     parser.add_argument("--do_sensitivity", action="store_true", default=True, help="Perform Sobol sensitivity analysis and re-distill with sensitive parameters")
@@ -317,7 +329,9 @@ def main():
     test_cases[is_zero_strain] = 2 # test_case_identifier_biaxial_tension
 
     mock_gp = MockGP(mean_psi, cov_psi, device=device)
-    model = PyTorchGMRModel(num_points, device=device, distill_target=args.distill_target)
+    include_log = args.material_model not in ["gmr_nolog", "gmr_no_log"]
+    model = PyTorchGMRModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
+    full_param_names_master = model.parameter_names
     output_selector = EnergyOutputSelector(num_outputs=mean_psi.shape[0])
 
     from uqmodeldisc.settings import Settings
@@ -426,7 +440,7 @@ def main():
         print("\nSaving parameter distribution plot before sensitivity analysis...")
         with torch.no_grad():
             samples_pre = distribution.sample(5000).cpu().numpy()
-        full_param_names_pre = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL1", "CL2", "D1", "D2", "D3")
+        full_param_names_pre = full_param_names_master
         pre_samples_path = os.path.join(out_dir, "flow_samples_before_sensitivity.npy")
         np.save(pre_samples_path, samples_pre)
         print(f"Saved pre-sensitivity parameter samples to {pre_samples_path}")
@@ -596,7 +610,7 @@ def main():
     # Draw 5000 samples and map back to full 12D space if reduced
     with torch.no_grad():
         samples = distribution.sample(5000)
-        full_param_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL1", "CL2", "D1", "D2", "D3")
+        full_param_names = full_param_names_master
         if samples.shape[1] < len(full_param_names):
             full_samples = torch.matmul(samples, model._parameter_population_matrix.T.to(samples.dtype))
             samples_np = full_samples.cpu().numpy()

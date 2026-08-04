@@ -36,7 +36,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default="extraction/extracted_models/20260714T093804_isihara_0.0001_0.01_8.0_0.95_5_80.0_1")
     parser.add_argument("--distilled_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, default="isihara", choices=["ogden", "gmr", "isihara"])
+    parser.add_argument("--material_model", type=str, default="isihara", choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara"])
     args = parser.parse_args()
     
     saved_model_dir = args.saved_model_dir
@@ -111,7 +111,7 @@ def main():
             alpha = theta[3:6]
             vol = theta[6:9]
             mat = get_material("ogden", mu_params=mu, alpha_params=alpha, vol_params=vol, jit_P=False)
-        elif args.material_model == "gmr":
+        elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
             dev = theta[:11] if len(theta) >= 14 else theta[:9]
             vol = theta[11:14] if len(theta) >= 14 else theta[9:12]
             mat = get_material("gmr", dev_params=dev, vol_params=vol, jit_P=False)

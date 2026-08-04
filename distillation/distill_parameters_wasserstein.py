@@ -94,7 +94,7 @@ def sample_dataset_deformations(saved_model_dir, num_points=128):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--material_model", type=str, default="ogden", choices=["ogden", "gmr", "isihara"])
+    parser.add_argument("--material_model", type=str, default="ogden", choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara"])
     parser.add_argument("--saved_model_dir", type=str, required=True, help="Path to GP saved model")
     parser.add_argument("--n_iterations", type=int, default=5000)
     parser.add_argument("--lr_flow", type=float, default=5e-4)
@@ -152,7 +152,10 @@ def main():
     if args.material_model == "ogden":
         num_params = 9 # 3 mu, 3 alpha, 3 vol
         param_names = [f"mu_{i+1}" for i in range(3)] + [f"alpha_{i+1}" for i in range(3)] + [f"D_{i+1}" for i in range(3)]
-    elif args.material_model == "gmr":
+    elif args.material_model in ["gmr", "gmr_log"]:
+        num_params = 14 # 11 dev, 3 vol
+        param_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL1", "CL2", "D1", "D2", "D3"]
+    elif args.material_model in ["gmr_nolog", "gmr_no_log"]:
         num_params = 12 # 9 dev, 3 vol
         param_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "D1", "D2", "D3"]
     elif args.material_model == "isihara":
@@ -190,9 +193,9 @@ def main():
                 alpha = t[3:6]
                 vol = t[6:9]
                 mat = get_material("ogden", mu_params=mu, alpha_params=alpha, vol_params=vol, jit_P=False)
-            elif args.material_model == "gmr":
-                dev = t[:9] 
-                vol = t[9:12]
+            elif args.material_model in ["gmr", "gmr_log", "gmr_nolog", "gmr_no_log"]:
+                dev = t[:11] if len(t) >= 14 else t[:9]
+                vol = t[11:14] if len(t) >= 14 else t[9:12]
                 mat = get_material("gmr", dev_params=dev, vol_params=vol, jit_P=False)
             elif args.material_model == "isihara":
                 mat = get_material("isihara", c10=t[0], c01=t[1], c20=t[2], d1=t[3], jit_P=False)
@@ -236,9 +239,9 @@ def main():
                     alpha = t[3:6]
                     vol = t[6:9]
                     mat = get_material("ogden", mu_params=mu, alpha_params=alpha, vol_params=vol, jit_P=False)
-                elif args.material_model == "gmr":
-                    dev = t[:9] 
-                    vol = t[9:12]
+                elif args.material_model in ["gmr", "gmr_log", "gmr_nolog", "gmr_no_log"]:
+                    dev = t[:11] if len(t) >= 14 else t[:9]
+                    vol = t[11:14] if len(t) >= 14 else t[9:12]
                     mat = get_material("gmr", dev_params=dev, vol_params=vol, jit_P=False)
                 elif args.material_model == "isihara":
                     mat = get_material("isihara", c10=t[0], c01=t[1], c20=t[2], d1=t[3], jit_P=False)

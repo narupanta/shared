@@ -417,7 +417,7 @@ if __name__ == "__main__" :
             if args.material_model == "isihara":
                 c10, c01, c20, d1 = params
                 mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
-            elif args.material_model == "gmr":
+            elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
                 c10, c01, c20, c02, c11, d1 = params
                 mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, c02=c02, c11=c11, d1=d1)
             else:

@@ -228,6 +228,8 @@ class Isihara(BaseMaterialModel):
         return self.d1 * (jnp.sqrt(I3_safe) - 1)**2
 
 @register_material("gmr")
+@register_material("gmr_log")
+@register_material("gmr_nolog")
 class GeneralizedMooneyRivlin(BaseMaterialModel):
     def __init__(self, dev_params=None, vol_params=None, jit_P: bool = True):
         super().__init__(jit_P=jit_P)

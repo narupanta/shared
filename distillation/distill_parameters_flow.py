@@ -66,7 +66,7 @@ def generate_standard_modes(num_points=100, max_gamma=2.0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--material_model", type=str, default="ogden", choices=["ogden", "gmr"])
+    parser.add_argument("--material_model", type=str, default="ogden", choices=["ogden", "gmr", "gmr_log", "gmr_nolog"])
     parser.add_argument("--saved_model_dir", type=str, required=True, help="Path to GP saved model")
     parser.add_argument("--dataset_name", type=str, required=True)
     parser.add_argument("--n_iterations", type=int, default=5000)
@@ -141,7 +141,10 @@ def main():
     if args.material_model == "ogden":
         num_params = 9 # 3 mu, 3 alpha, 3 vol
         param_names = [f"mu_{i+1}" for i in range(3)] + [f"alpha_{i+1}" for i in range(3)] + [f"D_{i+1}" for i in range(3)]
-    elif args.material_model == "gmr":
+    elif args.material_model in ["gmr", "gmr_log"]:
+        num_params = 14 # 11 dev, 3 vol
+        param_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL1", "CL2", "D1", "D2", "D3"]
+    elif args.material_model in ["gmr_nolog", "gmr_no_log"]:
         num_params = 12 # 9 dev, 3 vol
         param_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "D1", "D2", "D3"]
         
@@ -161,8 +164,8 @@ def main():
             vol = theta[6:9]
             mat = get_material("ogden", mu_params=mu, alpha_params=alpha, vol_params=vol, jit_P=False)
         else:
-            dev = theta[:9] 
-            vol = theta[9:12]
+            dev = theta[:11] if len(theta) >= 14 else theta[:9]
+            vol = theta[11:14] if len(theta) >= 14 else theta[9:12]
             mat = get_material("gmr", dev_params=dev, vol_params=vol, jit_P=False)
             
         pred = jax.vmap(mat.psi)(f_batch)

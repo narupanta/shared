@@ -24,15 +24,24 @@ project_dir = ProjectDirectory(settings)
 from distillation.distill_uqmodeldisc import PyTorchGMRModel
 
 # We need the model instance to load the normalizing flow parameters
-model = PyTorchGMRModel(num_points=1, device=device) # num_points doesn't really matter just to load
-
-print("Loading Normalizing Flow...")
-distribution = load_normalizing_flow_parameter_distribution(
-    model=model,
-    output_subdirectory=".",
-    project_directory=project_dir,
-    device=device
-)
+try:
+    model = PyTorchGMRModel(num_points=1, device=device, include_log_terms=True)
+    print("Loading Normalizing Flow (with log terms)...")
+    distribution = load_normalizing_flow_parameter_distribution(
+        model=model,
+        output_subdirectory=".",
+        project_directory=project_dir,
+        device=device
+    )
+except Exception:
+    print("Failed loading with 14 parameters (include_log_terms=True), retrying without log terms (12 parameters)...")
+    model = PyTorchGMRModel(num_points=1, device=device, include_log_terms=False)
+    distribution = load_normalizing_flow_parameter_distribution(
+        model=model,
+        output_subdirectory=".",
+        project_directory=project_dir,
+        device=device
+    )
 
 print("Drawing samples...")
 # The attribute is likely just 'sample' returning a tensor, but let's check its methods.
@@ -54,8 +63,8 @@ samples_path = os.path.join(settings.PROJECT_DIR, "pytorch_flow_samples.npy")
 np.save(samples_path, samples)
 print(f"Saved PyTorch samples to {samples_path}")
 
-# Now plot distributions for all 12 parameters
-parameter_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "D1", "D2", "D3"]
+# Now plot distributions for all parameters
+parameter_names = list(model.parameter_names)
 
 fig, axes = plt.subplots(3, 4, figsize=(18, 12))
 for i, name in enumerate(parameter_names):
