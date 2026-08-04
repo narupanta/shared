@@ -1,4 +1,6 @@
 import os
+import sys
+import resource
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -133,6 +135,7 @@ class HyperelasticGPTrainer:
         n_blocks = (n_iterations + block_size - 1) // block_size
 
         pbar = tqdm(range(n_blocks), desc="Training Sparse GP (JIT Blocks)", unit="block")
+        milestone_params = []
         
         step_idx = 0
         for _ in pbar:
@@ -161,12 +164,19 @@ class HyperelasticGPTrainer:
             postfix = self._record_metrics(step_idx, loss, aux_step, self.params)
             pbar.set_postfix(postfix)
                     
-            # Trigger progress visualizations during training milestones
-            if step_idx % max(1, (n_iterations // 5)) == 0 and step_idx != 0:
-                plot_model = SparseHyperelasticityGP(self.best_params, self.I_z, self.min_dev, self.min_vol, self.max_dev, self.max_vol)
-                plot_combined_validation(plot_model, self.true_mat_model, self.save_path, step_idx)
+            # Collect milestone parameter snapshots for post-training evolution plotting (avoids blocking JIT loop)
+            if step_idx % max(1, (n_iterations // 5)) == 0 and step_idx != 0 and step_idx != n_iterations:
+                milestone_params.append((step_idx, self.best_params))
 
-        # Final plots and validation
+        # Record and print peak memory usage upon completion of the optimization loop
+        self._log_memory_report()
+
+        # Final plots and post-training evolution validation
+        print("Generating training progress evolution plots...")
+        for m_step, m_params in milestone_params:
+            plot_model = SparseHyperelasticityGP(m_params, self.I_z, self.min_dev, self.min_vol, self.max_dev, self.max_vol)
+            plot_combined_validation(plot_model, self.true_mat_model, self.save_path, m_step)
+
         plot_loss_analysis(self.loss_components_hist, self.params_hist, self.steps_history, self.save_path)
         plot_parameters_hist(self.params_hist, self.steps_history, self.save_path)
         learned_gp = SparseHyperelasticityGP(self.best_params, self.I_z, self.min_dev, self.min_vol, self.max_dev, self.max_vol, beta=self.model.beta)
@@ -176,3 +186,52 @@ class HyperelasticGPTrainer:
         plot_energy_decomposition_validation(learned_gp, self.true_mat_model, self.save_path)
         
         return self.best_params
+
+    def _log_memory_report(self):
+        lines = [
+            "--------------------------------------------------",
+            "Memory Usage Report (Extraction Training Peak):"
+        ]
+        # Host CPU Peak RAM usage
+        try:
+            ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if sys.platform == "darwin":
+                peak_mb = ru_maxrss / (1024 ** 2)
+            else:
+                peak_mb = ru_maxrss / 1024.0
+            lines.append(f"Host CPU Peak RAM: {peak_mb:.2f} MB")
+        except Exception as e:
+            lines.append(f"Host CPU Peak RAM: Unavailable ({e})")
+            
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            lines.append(f"Host CPU Current RAM: {mem_info.rss / (1024 ** 2):.2f} MB")
+        except Exception:
+            pass
+            
+        # JAX Device Memory (GPU / TPU / CPU stats)
+        try:
+            devices = jax.local_devices()
+            for i, dev in enumerate(devices):
+                dev_str = f"Device {i} [{dev.device_kind} ({dev.platform})]:"
+                if hasattr(dev, "memory_stats") and dev.memory_stats() is not None:
+                    stats = dev.memory_stats()
+                    cur_bytes = stats.get("bytes_in_use", 0)
+                    peak_bytes = stats.get("peak_bytes_in_use", 0)
+                    if peak_bytes or cur_bytes:
+                        dev_str += f" Peak = {peak_bytes / (1024**2):.2f} MB | Current = {cur_bytes / (1024**2):.2f} MB"
+                    else:
+                        dev_str += " Memory stats reported 0 (Managed by driver/OS)"
+                else:
+                    dev_str += " Device memory statistics not supported"
+                lines.append(dev_str)
+        except Exception as e:
+            lines.append(f"JAX Device Memory: Unavailable ({e})")
+        lines.append("--------------------------------------------------")
+        
+        report_str = "\n".join(lines)
+        print("\n" + report_str)
+        with open(self.log_file_path, "a") as f:
+            f.write(report_str + "\n")

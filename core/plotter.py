@@ -296,6 +296,38 @@ import jax
 import matplotlib.pyplot as plt
 import os
 
+def _compute_regime_transitions(learned_gp, F_all, gamma):
+    """
+    Computes interpolation/extrapolation transition gamma values for each deformation mode.
+    Returns: trans_tot, trans_dev, trans_vol as lists of float gamma values.
+    """
+    true_min_dev = jnp.array(learned_gp.min_dev) - 1e-4
+    true_max_dev = jnp.array(learned_gp.max_dev) + 1e-4
+    true_min_vol = jnp.array(learned_gp.min_vol) - 1e-4
+    true_max_vol = jnp.array(learned_gp.max_vol) + 1e-4
+    
+    trans_tot, trans_dev, trans_vol = [], [], []
+    
+    for mode in range(F_all.shape[0]):
+        dev_m, vol_m = jax.vmap(learned_gp.feature_extractor.extract)(F_all[mode])
+        in_dev = ((dev_m[:, 0] >= true_min_dev[0]) & (dev_m[:, 0] <= true_max_dev[0]) &
+                  (dev_m[:, 1] >= true_min_dev[1]) & (dev_m[:, 1] <= true_max_dev[1]))
+        in_vol = (vol_m[:, 0] >= true_min_vol[0]) & (vol_m[:, 0] <= true_max_vol[0])
+        in_tot = in_dev & in_vol
+        
+        def _get_trans(mask):
+            if not jnp.all(mask):
+                idx = int(jnp.argmax(~mask))
+                val = float(gamma[idx])
+                return float(gamma[1]) if idx == 0 else val
+            return float(gamma.max())
+            
+        trans_dev.append(_get_trans(in_dev))
+        trans_vol.append(_get_trans(in_vol))
+        trans_tot.append(_get_trans(in_tot))
+        
+    return trans_tot, trans_dev, trans_vol
+
 def plot_combined_validation(learned_gp, true_model, save_path, step):
     num_points = 50
     num_samples = 32
@@ -345,6 +377,7 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
     
     P_samples = jax.vmap(piola_vmap, in_axes=(None, 0))(F_all, keys)
     P_dets = [jax.vmap(learned_gp.piola_det)(F_all[mode]) for mode in range(len(mode_names))]
+    trans_tot, _, _ = _compute_regime_transitions(learned_gp, F_all, gamma)
 
     # --- 3. Plotting ---
     fig, axes = plt.subplots(6, 2, figsize=(12, 24))
@@ -399,10 +432,16 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
         # Formatting
         ax_psi.set_title(f"{name}: Energy")
         ax_p.set_title(f"{name}: Stress")
+        trans_g = trans_tot[i]
+        max_g = float(gamma.max())
         for ax in [ax_psi, ax_p]:
+            ax.axvspan(0, min(trans_g, max_g), color='green', alpha=0.12, zorder=1, label="Interpolation" if (i == 0 and ax == ax_psi) else "")
+            if trans_g < max_g:
+                ax.axvspan(trans_g, max_g, color='red', alpha=0.12, zorder=1, label="Extrapolation" if (i == 0 and ax == ax_psi) else "")
+                ax.axvline(x=trans_g, color='darkred', linestyle=':', lw=1.5, alpha=0.8, zorder=4)
             ax.set_xlabel(r"$\gamma$")
             ax.grid(True, alpha=0.2)
-            if i == 0: ax.legend()
+            if i == 0: ax.legend(loc="upper left", framealpha=0.9)
 
     plt.tight_layout()
     save_file = os.path.join(save_path, f"clamped_validation_{step}.png")
@@ -829,6 +868,7 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
     psi_samples_dev = jnp.stack(psi_samples_dev, axis=0) 
     psi_samples_vol = jnp.stack(psi_samples_vol, axis=0)
     psi_samples_tot = jnp.stack(psi_samples_tot, axis=0)
+    trans_tot, trans_dev, trans_vol = _compute_regime_transitions(learned_gp, F_all, gamma)
 
     def calc_metrics(true, mean, std):
         rmse = jnp.sqrt(jnp.mean((true - mean)**2))
@@ -842,17 +882,23 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
 
     for i, name in enumerate(mode_names):
         configs = [
-            (0, "Deviatoric", psi_true_dev[i], psi_mean_dev[i], psi_std_dev[i], psi_samples_dev[:, i, :]),
-            (1, "Volumetric", psi_true_vol[i], psi_mean_vol[i], psi_std_vol[i], psi_samples_vol[:, i, :]),
-            (2, "Total Energy", psi_true_tot[i], psi_mean_tot[i], psi_std_tot[i], psi_samples_tot[:, i, :])
+            (0, "Deviatoric", psi_true_dev[i], psi_mean_dev[i], psi_std_dev[i], psi_samples_dev[:, i, :], trans_dev[i]),
+            (1, "Volumetric", psi_true_vol[i], psi_mean_vol[i], psi_std_vol[i], psi_samples_vol[:, i, :], trans_vol[i]),
+            (2, "Total Energy", psi_true_tot[i], psi_mean_tot[i], psi_std_tot[i], psi_samples_tot[:, i, :], trans_tot[i])
         ]
-        for col, col_name, true_val, mean_val, std_val, samples in configs:
+        for col, col_name, true_val, mean_val, std_val, samples, trans_g in configs:
             ax = axes[i, col]
             ax.plot(gamma, true_val, 'k--', lw=1.5, label="True", zorder=5)
             ax.plot(gamma, samples.T, color="lightblue", lw=0.8, alpha=0.3, zorder=1)
             ax.plot(gamma, mean_val, color="blue", lw=2, label="GP Mean", zorder=3)
             ax.fill_between(gamma, mean_val - 1.96*std_val, mean_val + 1.96*std_val, color="blue", alpha=0.2, zorder=2)
             
+            max_g = float(gamma.max())
+            ax.axvspan(0, min(trans_g, max_g), color='green', alpha=0.12, zorder=1, label="Interpolation" if (i == 0 and col == 2) else "")
+            if trans_g < max_g:
+                ax.axvspan(trans_g, max_g, color='red', alpha=0.12, zorder=1, label="Extrapolation" if (i == 0 and col == 2) else "")
+                ax.axvline(x=trans_g, color='darkred', linestyle=':', lw=1.5, alpha=0.8, zorder=4)
+
             rmse, coverage = calc_metrics(true_val, mean_val, std_val)
             
             ax.set_title(f"{name}: {col_name}\nRMSE: {rmse:.4f} | Cov: {coverage:.1f}%")
@@ -862,9 +908,9 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
             y_min, y_max = jnp.min(true_val), jnp.max(true_val)
             pad = (y_max - y_min) * 0.1
             ax.set_ylim(y_min - pad, y_max + pad)
-            ax.set_xlim(0, 1)
+            ax.set_xlim(0, max_g)
             if i == 0 and col == 2:
-                ax.legend()
+                ax.legend(loc="upper left", framealpha=0.9)
     
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, "energy_decomposition.png"), bbox_inches='tight')
