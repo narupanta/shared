@@ -46,6 +46,7 @@ def parse_args():
     
     # Booleans (using 0/1 as integers is often safer in shell scripts)
     parser.add_argument('--is_fixed_reaction_force_noise', type=int, default=1)
+    parser.add_argument('--is_fixed_inducing_points', type=int, default=1, help="Set to 1 to freeze inducing points at FPS picked locations, 0 to optimize them")
 
     # Handling the List [1, 5, 9] to cover the 10 steps range
     parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
@@ -60,12 +61,38 @@ def parse_args():
 def sigma_fix_to_log_sigma_fix(sigma_fix) :
     return jnp.log(jnp.maximum(sigma_fix, 1e-3))
 
+def inv_softplus(y):
+    """Computes initial raw parameters from physical coordinates in invariant space."""
+    y_safe = jnp.maximum(y, 1e-6)
+    return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.maximum(jnp.exp(y_safe) - 1.0, 1e-8)))
 
-
-def freeze_reaction_force_noise(grads) :
-    return grads._replace(
-        log_sigma_fix_x=jnp.zeros_like(grads.log_sigma_fix_x),
-        log_sigma_fix_y=jnp.zeros_like(grads.log_sigma_fix_y))
+def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool):
+    def freeze_fn(grads):
+        # 1. ALWAYS anchor index 0 (reference free state) in BOTH training modes
+        grads = grads._replace(
+            raw_dev_z=grads.raw_dev_z.at[0].set(0.0),
+            raw_vol_z=grads.raw_vol_z.at[0].set(0.0),
+            raw_dev_u_mean=grads.raw_dev_u_mean.at[0].set(0.0),
+            raw_dev_u_var=grads.raw_dev_u_var.at[0].set(0.0),
+            raw_vol_u_mean=grads.raw_vol_u_mean.at[0].set(0.0),
+            raw_vol_u_var=grads.raw_vol_u_var.at[0].set(0.0)
+        )
+        
+        # 2. Optionally freeze reaction force noise parameters
+        if is_fixed_noise:
+            grads = grads._replace(
+                log_sigma_fix_x=jnp.zeros_like(grads.log_sigma_fix_x),
+                log_sigma_fix_y=jnp.zeros_like(grads.log_sigma_fix_y)
+            )
+            
+        # 3. Optionally freeze ALL inducing point positions (from FPS)
+        if is_fixed_z:
+            grads = grads._replace(
+                raw_dev_z=jnp.zeros_like(grads.raw_dev_z),
+                raw_vol_z=jnp.zeros_like(grads.raw_vol_z)
+            )
+        return grads
+    return freeze_fn
 
 
 
@@ -87,13 +114,14 @@ if __name__ == "__main__" :
     n_ip = args.n_ip
     beta = args.beta
     is_fixed_reaction_force_noise = args.is_fixed_reaction_force_noise
+    is_fixed_inducing_points = args.is_fixed_inducing_points
 
     n_iterations = args.n_iterations
     learning_rate = args.learning_rate
 
     # Subfolder with datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-    training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}"
+    training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}"
     save_path = os.path.join(base_save_path, f"{timestamp}_{training_config_str}")
     os.makedirs(save_path, exist_ok=True)
 
@@ -149,6 +177,16 @@ if __name__ == "__main__" :
         best_params_dict = np.load(os.path.join(resume_dir, "best_params.npy"), allow_pickle=True).item()
         params = GPRawParams(**best_params_dict)
     else:
+        # Initialize inducing point locations directly from FPS picking on training data
+        raw_dev_z_fps = inv_softplus(dev_z - jnp.array([3.0, 3.0]))
+        raw_vol_z_fps = inv_softplus(vol_z)
+        
+        # Anchor index 0 (free state) in initial parameters for both training modes
+        raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
+        raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
+        raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+        raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
                 # Lengthscales and signal variances (Normal(0, 1))
@@ -156,16 +194,16 @@ if __name__ == "__main__" :
                 raw_dev_sig=jax.random.normal(k1, ()),
                 
                 # Inducing point means and variances
-                raw_dev_z =jax.random.normal(k2, (n_ip, 2)),
-                raw_dev_u_mean=jax.random.normal(k2, (n_ip,)),
-                raw_dev_u_var=jax.random.normal(k2, (n_ip,)),
+                raw_dev_z=raw_dev_z_fps,
+                raw_dev_u_mean=raw_dev_u_mean_init,
+                raw_dev_u_var=raw_dev_u_var_init,
 
                 raw_vol_ls=jax.random.normal(k3, (1,)),
                 raw_vol_sig=jax.random.normal(k3, ()),
 
-                raw_vol_z =jax.random.normal(k4, (n_ip,1)),        
-                raw_vol_u_mean=jax.random.normal(k4, (n_ip,)),
-                raw_vol_u_var=jax.random.normal(k4, (n_ip,)),
+                raw_vol_z=raw_vol_z_fps,        
+                raw_vol_u_mean=raw_vol_u_mean_init,
+                raw_vol_u_var=raw_vol_u_var_init,
                 raw_vol_kappa=jnp.array(0.0),
 
 
@@ -183,16 +221,16 @@ if __name__ == "__main__" :
                 raw_dev_sig=jax.random.normal(k1, ()),
                 
                 # Inducing point means and variances
-                raw_dev_z =jax.random.normal(k2, (n_ip, 2)),
-                raw_dev_u_mean=jax.random.normal(k2, (n_ip,)),
-                raw_dev_u_var=jax.random.normal(k2, (n_ip,)),
+                raw_dev_z=raw_dev_z_fps,
+                raw_dev_u_mean=raw_dev_u_mean_init,
+                raw_dev_u_var=raw_dev_u_var_init,
 
                 raw_vol_ls=jax.random.normal(k3, (1,)),
                 raw_vol_sig=jax.random.normal(k3, ()),
 
-                raw_vol_z =jax.random.normal(k4, (n_ip,1)),        
-                raw_vol_u_mean=jax.random.normal(k4, (n_ip,)),
-                raw_vol_u_var=jax.random.normal(k4, (n_ip,)),
+                raw_vol_z=raw_vol_z_fps,        
+                raw_vol_u_mean=raw_vol_u_mean_init,
+                raw_vol_u_var=raw_vol_u_var_init,
                 raw_vol_kappa=jnp.array(0.0),
 
 
@@ -234,7 +272,7 @@ if __name__ == "__main__" :
         min_vol=min_vol,
         max_dev=max_dev,
         max_vol=max_vol,
-        freeze_fn=freeze_reaction_force_noise if is_fixed_reaction_force_noise else None
+        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points)
     )
 
     log_info_str = f"{train_load_steps_indices}, {material_model_name}"
