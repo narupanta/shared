@@ -1,6 +1,9 @@
 # Start from the official Dolfinx image
 FROM --platform=linux/amd64 dolfinx/dolfinx:stable
 
+# Define build argument for hardware target ("cpu" or "cuda")
+ARG USE_CUDA="cpu"
+
 
 # ---------------------------
 # Upgrade pip and Python packages
@@ -17,11 +20,7 @@ RUN pip install --no-cache-dir \
     tqdm \
     scikit-learn \
     matplotlib \
-    matplotlib-label-lines 
-    
-RUN pip install --no-cache-dir \
-    jax \
-    jaxlib \
+    matplotlib-label-lines \
     meshio \
     pyfiglet \
     jax-fem \
@@ -32,6 +31,13 @@ RUN pip install --no-cache-dir \
     normflows==1.7.3 \
     openpyxl==3.1.5 \
     SALib==1.5.1
+    
+# Conditionally install CUDA-enabled JAX (for HPC/Singularity) or CPU JAX (for Mac/local)
+RUN if [ "$USE_CUDA" = "cuda" ]; then \
+        pip install --no-cache-dir --upgrade "jax[cuda12]" ; \
+    else \
+        pip install --no-cache-dir jax jaxlib ; \
+    fi
 
 
 # Set working directory
