@@ -34,10 +34,10 @@ def parse_args():
 
     # Dataset & Model Config
     parser.add_argument('--material_model_name', type=str, default="isihara")
-    parser.add_argument('--disp_noise', type=float, default=0.000)
+    parser.add_argument('--disp_noise', type=float, default=0.0001)
     parser.add_argument('--load_noise', type=float, default=0.01)
     parser.add_argument('--target_load_true_top', type=float, default=8.0)
-    parser.add_argument('--asym_factor', type=float, default=0.9)
+    parser.add_argument('--asym_factor', type=float, default=0.95)
 
     # Training Config
     parser.add_argument('--number_of_mci_sampling', type=int, default=3)
@@ -47,8 +47,8 @@ def parse_args():
     # Booleans (using 0/1 as integers is often safer in shell scripts)
     parser.add_argument('--is_fixed_reaction_force_noise', type=int, default=1)
 
-    # Handling the List [2, 10, 20] to cover the full 21 steps range
-    parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[2, 10, 20])
+    # Handling the List [1, 5, 9] to cover the 10 steps range
+    parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
     parser.add_argument('--n_iterations', type=int, default=1000)
     parser.add_argument('--learning_rate', type=float, default=0.01)
     
@@ -109,7 +109,7 @@ if __name__ == "__main__" :
     # Data use in VFM
     f3x3 = jax.vmap(jax.vmap(fto3x3))(f2x2)
     f_neu_nodes = prep_data["f_neu"][train_load_steps_indices] 
-    node_type = prep_data["node_type"]
+    node_type = np.asarray(prep_data["node_type"])
     dNdX = prep_data["dNdX"]
     dA = prep_data["dA"]
     cells = prep_data["cells"]
